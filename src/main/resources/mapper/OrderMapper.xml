@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.example.orderSystem.mapper.OrderMapper">
+
+    <resultMap id="orderDetailMap" type="com.example.orderSystem.dto.response.OrderDetailResponse">
+        <result property="orderId" column="order_id"/>
+        <result property="orderName" column="order_name"/>
+        <result property="minOrderAmount" column="min_order_amount"/>
+        <result property="deadline" column="deadline"/>
+        <result property="status" column="status"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="createdAt" column="created_at"/>
+        <collection property="orderItems" ofType="com.example.orderSystem.dto.response.OrderItemResponse">
+            <result property="itemId" column="item_id"/>
+            <result property="userId" column="user_id"/>
+            <result property="userName" column="user_name"/>
+            <result property="productName" column="product_name"/>
+            <result property="unitPrice" column="unit_price"/>
+            <result property="quantity" column="quantity"/>
+            <result property="subtotal" column="subtotal"/>
+        </collection>
+    </resultMap>
+
+    <select id="getOrderDetail" resultMap="orderDetailMap">
+        SELECT
+            o.order_id, o.order_name, o.deadline, o.status,
+            o.created_by, o.created_at,
+            s.min_order_amount,
+            oi.item_id, oi.user_id, u.user_name,
+            oi.product_name, oi.unit_price, oi.quantity, oi.subtotal
+        FROM orders o
+        JOIN stores s ON o.store_id = s.store_id
+        LEFT JOIN order_items oi ON o.order_id = oi.order_id
+        LEFT JOIN users u ON oi.user_id = u.user_id
+        WHERE o.order_id = #{orderId}
+    </select>
+
+</mapper>
