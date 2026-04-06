@@ -68,9 +68,7 @@ public class OrderController {
             @Valid @RequestBody DeleteOrderItemRequest request,
             HttpServletRequest httpRequest) {
         String userId = (String) httpRequest.getAttribute("userId");
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        String role = auth.getAuthorities().iterator().next().getAuthority().replace("ROLE_", "").toLowerCase();
-        orderService.deleteUserOrder(request, userId, role);
+        orderService.deleteUserOrder(request, userId, getCurrentRole());
         return ResponseEntity.ok(Map.of("message", "刪除成功"));
     }
 
@@ -79,9 +77,7 @@ public class OrderController {
             @RequestBody Map<String, String> body,
             HttpServletRequest httpRequest) {
         String userId = (String) httpRequest.getAttribute("userId");
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        String role = auth.getAuthorities().iterator().next().getAuthority().replace("ROLE_", "").toLowerCase();
-        orderService.cancelOrder(body.get("orderId"), userId, role);
+        orderService.cancelOrder(body.get("orderId"), userId, getCurrentRole());
         return ResponseEntity.ok(Map.of("message", "訂單已取消"));
     }
 
@@ -89,5 +85,14 @@ public class OrderController {
     public ResponseEntity<Map<String, String>> payOrder(@RequestBody Map<String, String> body) {
         orderService.payOrder(body.get("orderId"));
         return ResponseEntity.ok(Map.of("message", "扣款成功"));
+    }
+
+    private String getCurrentRole() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || auth.getAuthorities().isEmpty()) {
+            return "employee";
+        }
+        return auth.getAuthorities().iterator().next().getAuthority()
+                .replace("ROLE_", "").toLowerCase();
     }
 }
