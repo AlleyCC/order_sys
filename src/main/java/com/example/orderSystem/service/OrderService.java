@@ -1,31 +1,36 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.orderSystem.dto.request.CreateOrderItemRequest;
+import com.example.orderSystem.dto.request.CreateOrderRequest;
+import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
-import com.example.orderSystem.entity.Order;
-import com.example.orderSystem.entity.OrderItem;
-import com.example.orderSystem.entity.Store;
-import com.example.orderSystem.entity.User;
+import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
-import com.example.orderSystem.exception.ResourceNotFoundException;
-import com.example.orderSystem.mapper.OrderItemMapper;
-import com.example.orderSystem.mapper.OrderMapper;
-import com.example.orderSystem.mapper.StoreMapper;
-import com.example.orderSystem.mapper.UserMapper;
+import com.example.orderSystem.enums.TradeType;
+import com.example.orderSystem.exception.*;
+import com.example.orderSystem.mapper.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
-import java.util.Map;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class OrderService {
 
+    private static final DateTimeFormatter DATETIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
     private final StoreMapper storeMapper;
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
+    private final MenuMapper menuMapper;
     private final UserMapper userMapper;
+    private final TransactionMapper transactionMapper;
 
     public List<Store> getAllShops() {
         return storeMapper.selectList(null);
@@ -79,5 +84,168 @@ public class OrderService {
                 "balance", balance,
                 "availableBalance", balance - frozenAmount
         );
+    }
+
+    // ========== Write APIs ==========
+
+    public Map<String, String> createOrder(CreateOrderRequest request, String userId) {
+        Store store = storeMapper.selectById(request.getStoreId());
+        if (store == null) {
+            throw new ResourceNotFoundException("店家不存在");
+        }
+
+        Order order = new Order();
+        order.setOrderId(UUID.randomUUID().toString());
+        order.setStoreId(request.getStoreId());
+        order.setCreatedBy(userId);
+        order.setOrderName(request.getOrderName());
+        order.setStatus(OrderStatus.OPEN);
+        order.setDeadline(LocalDateTime.parse(request.getDeadline(), DATETIME_FMT));
+        orderMapper.insert(order);
+
+        return Map.of("orderId", order.getOrderId(), "storeId", order.getStoreId());
+    }
+
+    public void createUserOrder(CreateOrderItemRequest request, String userId) {
+        // 1. Validate order
+        Order order = orderMapper.selectById(request.getOrderId());
+        if (order == null) {
+            throw new ResourceNotFoundException("該筆訂單不存在");
+        }
+        if (order.getStatus() != OrderStatus.OPEN) {
+            throw new IllegalStateException("訂單非開團中狀態");
+        }
+        if (order.getDeadline().isBefore(LocalDateTime.now())) {
+            throw new IllegalStateException("訂單已過截止時間");
+        }
+
+        // 2. Validate menu
+        Menu menu = menuMapper.selectById(request.getMenuId());
+        if (menu == null) {
+            throw new ResourceNotFoundException("菜單品項不存在");
+        }
+        if (!menu.getIsAvailable()) {
+            throw new IllegalStateException("該品項已下架");
+        }
+
+        // 3. Check available balance
+        int orderAmount = menu.getUnitPrice() * request.getQuantity();
+        Map<String, Object> account = getUserAccount(userId);
+        long available = (long) account.get("availableBalance");
+        if (available < orderAmount) {
+            throw new InsufficientBalanceException("餘額不足");
+        }
+
+        // 4. Insert order item with snapshot
+        OrderItem item = new OrderItem();
+        item.setOrderId(request.getOrderId());
+        item.setUserId(userId);
+        item.setMenuId(request.getMenuId());
+        item.setProductName(menu.getProductName());
+        item.setUnitPrice(menu.getUnitPrice());
+        item.setQuantity(request.getQuantity());
+        orderItemMapper.insert(item);
+    }
+
+    public void deleteUserOrder(DeleteOrderItemRequest request, String userId, String role) {
+        Order order = orderMapper.selectById(request.getOrderId());
+        if (order == null) {
+            throw new ResourceNotFoundException("訂單不存在");
+        }
+        if (order.getStatus() != OrderStatus.OPEN) {
+            throw new IllegalStateException("僅 OPEN 狀態的訂單可刪除品項");
+        }
+
+        if ("all".equals(request.getItemId())) {
+            // Cancel entire order — only owner or admin
+            if (!"admin".equals(role) && !order.getCreatedBy().equals(userId)) {
+                throw new ForbiddenException("無權限刪除此訂單");
+            }
+            order.setStatus(OrderStatus.CANCELLED);
+            orderMapper.updateById(order);
+        } else {
+            // Delete single item
+            int itemId = Integer.parseInt(request.getItemId());
+            OrderItem item = orderItemMapper.selectById(itemId);
+            if (item == null) {
+                throw new ResourceNotFoundException("品項不存在");
+            }
+            // Permission check
+            boolean isAdmin = "admin".equals(role);
+            boolean isOwner = order.getCreatedBy().equals(userId);
+            boolean isItemOwner = item.getUserId().equals(userId);
+            if (!isAdmin && !isOwner && !isItemOwner) {
+                throw new ForbiddenException("無權限刪除此品項");
+            }
+            orderItemMapper.deleteById(itemId);
+        }
+    }
+
+    public void cancelOrder(String orderId, String userId, String role) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            throw new ResourceNotFoundException("訂單不存在");
+        }
+        if (!"admin".equals(role) && !order.getCreatedBy().equals(userId)) {
+            throw new ForbiddenException("僅開團者或 admin 可取消訂單");
+        }
+        if (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.CLOSED) {
+            throw new IllegalStateException("僅 OPEN 或 CLOSED 狀態的訂單可取消");
+        }
+
+        order.setStatus(OrderStatus.CANCELLED);
+        orderMapper.updateById(order);
+    }
+
+    @Transactional
+    public void payOrder(String orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            throw new ResourceNotFoundException("訂單不存在");
+        }
+        if (order.getStatus() == OrderStatus.SETTLED) {
+            throw new ConflictException("該訂單已結算，無法進行付款");
+        }
+        if (order.getStatus() == OrderStatus.OPEN) {
+            throw new IllegalStateException("訂單尚未截止");
+        }
+        if (order.getStatus() != OrderStatus.CLOSED && order.getStatus() != OrderStatus.FAILED) {
+            throw new IllegalStateException("訂單狀態不允許結算");
+        }
+
+        // Group items by user
+        List<OrderItem> items = orderItemMapper.selectList(
+                new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId)
+        );
+        Map<String, Long> userTotals = items.stream()
+                .collect(Collectors.groupingBy(OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
+
+        // CAS debit each user
+        for (Map.Entry<String, Long> entry : userTotals.entrySet()) {
+            String userId = entry.getKey();
+            long amount = entry.getValue();
+
+            int affected = userMapper.casDebit(userId, amount);
+            if (affected == 0) {
+                order.setStatus(OrderStatus.FAILED);
+                orderMapper.updateById(order);
+                throw new InsufficientBalanceException(userId + " 餘額不足");
+            }
+
+            // Read new balance and insert transaction
+            User user = userMapper.selectById(userId);
+            Transaction txn = new Transaction();
+            txn.setTransactionId(UUID.randomUUID().toString());
+            txn.setUserId(userId);
+            txn.setOrderId(orderId);
+            txn.setAmount(Math.toIntExact(amount));
+            txn.setClosingBalance(user.getBalance().intValue());
+            txn.setType(TradeType.DEBIT);
+            txn.setCreatedBy(order.getCreatedBy());
+            transactionMapper.insert(txn);
+        }
+
+        order.setStatus(OrderStatus.SETTLED);
+        orderMapper.updateById(order);
     }
 }

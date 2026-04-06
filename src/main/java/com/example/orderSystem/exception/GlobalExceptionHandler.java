@@ -28,6 +28,26 @@ public class GlobalExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
     }
 
+    @ExceptionHandler(ForbiddenException.class)
+    public ProblemDetail handleForbidden(ForbiddenException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, ex.getMessage());
+    }
+
+    @ExceptionHandler(InsufficientBalanceException.class)
+    public ProblemDetail handleInsufficientBalance(InsufficientBalanceException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ProblemDetail handleConflict(ConflictException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(IllegalStateException.class)
+    public ProblemDetail handleIllegalState(IllegalStateException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
     @ExceptionHandler(org.springframework.web.bind.MissingServletRequestParameterException.class)
     public ProblemDetail handleMissingParam(org.springframework.web.bind.MissingServletRequestParameterException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "必須輸入 " + ex.getParameterName());
