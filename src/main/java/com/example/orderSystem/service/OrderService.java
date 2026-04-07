@@ -1,6 +1,8 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.orderSystem.dto.request.CreateOrderItemRequest;
 import com.example.orderSystem.dto.request.CreateOrderRequest;
 import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -32,21 +35,14 @@ public class OrderService {
     private final UserMapper userMapper;
     private final OrderSettlementQueue settlementQueue;
     private final PaymentService paymentService;
+    private final NotificationService notificationService;
 
     public List<Store> getAllShops() {
         return storeMapper.selectList(null);
     }
 
-    public List<Map<String, Object>> getAllOrders() {
-        return orderMapper.selectList(null).stream().map(order -> {
-            Store store = storeMapper.selectById(order.getStoreId());
-            return Map.<String, Object>of(
-                    "orderId", order.getOrderId(),
-                    "orderName", order.getOrderName(),
-                    "deadline", order.getDeadline(),
-                    "minOrderAmount", store != null ? store.getMinOrderAmount() : 0
-            );
-        }).toList();
+    public IPage<Map<String, Object>> getAllOrders(int page, int size) {
+        return orderMapper.getAllOrdersWithStore(new Page<>(page, size));
     }
 
     public OrderDetailResponse getOrderDetail(String orderId) {
@@ -64,22 +60,7 @@ public class OrderService {
         }
 
         long balance = user.getBalance();
-
-        // available = balance - SUM(OPEN + FAILED orders' subtotals)
-        List<Order> frozenOrders = orderMapper.selectList(
-                new LambdaQueryWrapper<Order>()
-                        .in(Order::getStatus, OrderStatus.OPEN, OrderStatus.FAILED)
-        );
-
-        long frozenAmount = 0;
-        for (Order order : frozenOrders) {
-            List<OrderItem> items = orderItemMapper.selectList(
-                    new LambdaQueryWrapper<OrderItem>()
-                            .eq(OrderItem::getOrderId, order.getOrderId())
-                            .eq(OrderItem::getUserId, userId)
-            );
-            frozenAmount += items.stream().mapToLong(OrderItem::getSubtotal).sum();
-        }
+        long frozenAmount = orderItemMapper.getFrozenAmount(userId);
 
         return Map.of(
                 "balance", balance,
@@ -149,6 +130,12 @@ public class OrderService {
         item.setUnitPrice(menu.getUnitPrice());
         item.setQuantity(request.getQuantity());
         orderItemMapper.insert(item);
+
+        // Notify balance update
+        Map<String, Object> updatedAccount = getUserAccount(userId);
+        long updatedAvailable = (long) updatedAccount.get("availableBalance");
+        notificationService.sendBalanceUpdate(userId, updatedAvailable,
+                "下單：" + menu.getProductName() + " x" + request.getQuantity());
     }
 
     public void deleteUserOrder(DeleteOrderItemRequest request, String userId, String role) {
@@ -183,6 +170,12 @@ public class OrderService {
                 throw new ForbiddenException("無權限刪除此品項");
             }
             orderItemMapper.deleteById(itemId);
+
+            // Notify balance update to the item owner
+            String itemOwner = item.getUserId();
+            Map<String, Object> updatedAccount = getUserAccount(itemOwner);
+            long updatedAvailable = (long) updatedAccount.get("availableBalance");
+            notificationService.sendBalanceUpdate(itemOwner, updatedAvailable, "刪除品項：" + item.getProductName());
         }
     }
 
@@ -222,8 +215,29 @@ public class OrderService {
         // Attempt payment
         try {
             payOrder(orderId);
+            // Notify all users of successful settlement
+            notifySettlementResult(order, true);
         } catch (InsufficientBalanceException e) {
             log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
+            notifySettlementResult(order, false);
+        }
+    }
+
+    private void notifySettlementResult(Order order, boolean success) {
+        List<OrderItem> items = orderItemMapper.selectList(
+                new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()));
+        Map<String, Long> userTotals = items.stream()
+                .collect(Collectors.groupingBy(
+                        OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
+
+        for (String userId : userTotals.keySet()) {
+            if (success) {
+                User user = userMapper.selectById(userId);
+                notificationService.sendSettlementSuccess(userId, order.getOrderId(),
+                        order.getOrderName(), userTotals.get(userId).intValue(), user.getBalance());
+            } else {
+                notificationService.sendSettlementFailed(userId, order.getOrderId(), order.getOrderName());
+            }
         }
     }
 

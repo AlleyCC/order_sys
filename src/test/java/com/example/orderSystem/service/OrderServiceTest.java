@@ -50,6 +50,8 @@ class OrderServiceTest {
     private OrderSettlementQueue settlementQueue;
     @Mock
     private PaymentService paymentService;
+    @Mock
+    private NotificationService notificationService;
 
     // ========== helpers ==========
 
@@ -154,8 +156,7 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(menuMapper.selectById(1)).thenReturn(menu);
             when(userMapper.selectById("alice")).thenReturn(user);
-            lenient().when(orderItemMapper.selectList(any())).thenReturn(List.of());
-            lenient().when(orderMapper.selectList(any())).thenReturn(List.of());
+            when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
             when(orderItemMapper.insert((OrderItem) any())).thenReturn(1);
 
             assertThatCode(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 2), "alice"))
@@ -194,8 +195,7 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(menuMapper.selectById(1)).thenReturn(menu);
             when(userMapper.selectById("alice")).thenReturn(user);
-            lenient().when(orderMapper.selectList(any())).thenReturn(List.of());
-            lenient().when(orderItemMapper.selectList(any())).thenReturn(List.of());
+            when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
                     .isInstanceOf(InsufficientBalanceException.class);
@@ -225,6 +225,8 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
+            when(userMapper.selectById("alice")).thenReturn(createUser("alice", 5000L));
+            when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "alice", "employee"))
@@ -254,6 +256,8 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
+            when(userMapper.selectById("charlie")).thenReturn(createUser("charlie", 3000L));
+            when(orderItemMapper.getFrozenAmount("charlie")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "admin", "admin"))

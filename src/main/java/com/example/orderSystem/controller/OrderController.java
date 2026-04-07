@@ -30,8 +30,10 @@ public class OrderController {
     }
 
     @GetMapping("/order/get_all_orders")
-    public ResponseEntity<List<Map<String, Object>>> getAllOrders() {
-        return ResponseEntity.ok(orderService.getAllOrders());
+    public ResponseEntity<?> getAllOrders(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(orderService.getAllOrders(page, size));
     }
 
     @GetMapping("/order/get_order_detail")

@@ -23,6 +23,16 @@
         </collection>
     </resultMap>
 
+    <select id="getAllOrdersWithStore" resultType="java.util.Map">
+        SELECT
+            o.order_id AS orderId,
+            o.order_name AS orderName,
+            o.deadline AS deadline,
+            s.min_order_amount AS minOrderAmount
+        FROM orders o
+        JOIN stores s ON o.store_id = s.store_id
+    </select>
+
     <select id="getOrderDetail" resultMap="orderDetailMap">
         SELECT
             o.order_id, o.order_name, o.deadline, o.status,

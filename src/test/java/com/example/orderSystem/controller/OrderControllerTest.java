@@ -88,16 +88,30 @@ class OrderControllerTest {
     class GetAllOrders {
 
         @Test
-        @DisplayName("有 Token → 200, 回傳訂單列表")
-        void returnsAllOrders() throws Exception {
+        @DisplayName("預設分頁 → 200, 回傳 records + total + page 資訊")
+        void returnsPagedOrders() throws Exception {
             mockMvc.perform(get("/order/get_all_orders")
                             .header("Authorization", "Bearer " + aliceToken))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", hasSize(greaterThanOrEqualTo(2))))
-                    .andExpect(jsonPath("$[0].orderId").isNotEmpty())
-                    .andExpect(jsonPath("$[0].orderName").isNotEmpty())
-                    .andExpect(jsonPath("$[0].deadline").isNotEmpty())
-                    .andExpect(jsonPath("$[0].minOrderAmount").isNumber());
+                    .andExpect(jsonPath("$.records").isArray())
+                    .andExpect(jsonPath("$.records", hasSize(greaterThanOrEqualTo(2))))
+                    .andExpect(jsonPath("$.records[0].orderId").isNotEmpty())
+                    .andExpect(jsonPath("$.records[0].orderName").isNotEmpty())
+                    .andExpect(jsonPath("$.total").isNumber())
+                    .andExpect(jsonPath("$.current").value(1))
+                    .andExpect(jsonPath("$.size").value(10));
+        }
+
+        @Test
+        @DisplayName("指定 page=1, size=1 → 只回傳 1 筆")
+        void customPageSize() throws Exception {
+            mockMvc.perform(get("/order/get_all_orders")
+                            .param("page", "1")
+                            .param("size", "1")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.records", hasSize(1)))
+                    .andExpect(jsonPath("$.total").value(greaterThanOrEqualTo(2)));
         }
 
         @Test
