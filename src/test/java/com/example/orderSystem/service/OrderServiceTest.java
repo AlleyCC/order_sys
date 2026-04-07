@@ -9,6 +9,8 @@ import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.TradeType;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
+import com.example.orderSystem.scheduler.OrderSettlementQueue;
+import com.example.orderSystem.service.PaymentService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -24,6 +26,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doThrow;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
@@ -43,6 +46,10 @@ class OrderServiceTest {
     private UserMapper userMapper;
     @Mock
     private TransactionMapper transactionMapper;
+    @Mock
+    private OrderSettlementQueue settlementQueue;
+    @Mock
+    private PaymentService paymentService;
 
     // ========== helpers ==========
 
@@ -343,41 +350,28 @@ class OrderServiceTest {
     class PayOrder {
 
         @Test
-        @DisplayName("CLOSED 訂單全員餘額足夠 → SETTLED")
+        @DisplayName("CLOSED 訂單 → paymentService.executePayment 被呼叫")
         void settleSuccess() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
-            OrderItem item1 = createOrderItem(1, "ord-001", "alice", 105);
-            OrderItem item2 = createOrderItem(2, "ord-001", "bob", 140);
-            User alice = createUser("alice", 5000L);
-            User bob = createUser("bob", 5000L);
-
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderItemMapper.selectList(any())).thenReturn(List.of(item1, item2));
-            when(userMapper.casDebit("alice", 105)).thenReturn(1);
-            when(userMapper.casDebit("bob", 140)).thenReturn(1);
-            when(userMapper.selectById("alice")).thenReturn(alice);
-            when(userMapper.selectById("bob")).thenReturn(bob);
-            when(transactionMapper.insert((Transaction) any())).thenReturn(1);
-            when(orderMapper.updateById((Order) any())).thenReturn(1);
 
             orderService.payOrder("ord-001");
 
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.SETTLED);
-            verify(transactionMapper, times(2)).insert((Transaction) any());
+            verify(paymentService).executePayment(order);
         }
 
         @Test
-        @DisplayName("餘額不足 → FAILED + rollback")
+        @DisplayName("餘額不足 → FAILED + 拋出 InsufficientBalanceException")
         void insufficientBalance() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
-            OrderItem item = createOrderItem(1, "ord-001", "alice", 9999);
-
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderItemMapper.selectList(any())).thenReturn(List.of(item));
-            when(userMapper.casDebit("alice", 9999)).thenReturn(0); // balance not enough
+            doThrow(new InsufficientBalanceException("alice 餘額不足"))
+                    .when(paymentService).executePayment(order);
+            lenient().when(orderMapper.updateById((Order) any())).thenReturn(1);
 
             assertThatThrownBy(() -> orderService.payOrder("ord-001"))
                     .isInstanceOf(InsufficientBalanceException.class);
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.FAILED);
         }
 
         @Test
