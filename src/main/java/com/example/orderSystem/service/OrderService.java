@@ -7,18 +7,18 @@ import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
 import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
-import com.example.orderSystem.enums.TradeType;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
+import com.example.orderSystem.scheduler.OrderSettlementQueue;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderService {
@@ -30,7 +30,8 @@ public class OrderService {
     private final OrderItemMapper orderItemMapper;
     private final MenuMapper menuMapper;
     private final UserMapper userMapper;
-    private final TransactionMapper transactionMapper;
+    private final OrderSettlementQueue settlementQueue;
+    private final PaymentService paymentService;
 
     public List<Store> getAllShops() {
         return storeMapper.selectList(null);
@@ -103,6 +104,9 @@ public class OrderService {
         order.setDeadline(LocalDateTime.parse(request.getDeadline(), DATETIME_FMT));
         orderMapper.insert(order);
 
+        // Schedule auto-settlement at deadline
+        settlementQueue.add(order.getOrderId(), order.getDeadline());
+
         return Map.of("orderId", order.getOrderId(), "storeId", order.getStoreId());
     }
 
@@ -163,6 +167,7 @@ public class OrderService {
             }
             order.setStatus(OrderStatus.CANCELLED);
             orderMapper.updateById(order);
+            settlementQueue.remove(order.getOrderId());
         } else {
             // Delete single item
             int itemId = Integer.parseInt(request.getItemId());
@@ -195,9 +200,37 @@ public class OrderService {
 
         order.setStatus(OrderStatus.CANCELLED);
         orderMapper.updateById(order);
+        settlementQueue.remove(orderId);
     }
 
-    @Transactional
+    /**
+     * Called by DelayQueue consumer when deadline arrives.
+     * OPEN → CLOSED → attempt payOrder.
+     */
+    public void settleOrder(String orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null || order.getStatus() != OrderStatus.OPEN) {
+            log.info("Skipping settlement for order {} (status: {})",
+                    orderId, order != null ? order.getStatus() : "not found");
+            return;
+        }
+
+        // OPEN → CLOSED
+        order.setStatus(OrderStatus.CLOSED);
+        orderMapper.updateById(order);
+
+        // Attempt payment
+        try {
+            payOrder(orderId);
+        } catch (InsufficientBalanceException e) {
+            log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
+        }
+    }
+
+    /**
+     * Pay order: CAS debit each user, write transactions, set SETTLED.
+     * On insufficient balance: set FAILED (outside transaction) then throw.
+     */
     public void payOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
         if (order == null) {
@@ -213,39 +246,13 @@ public class OrderService {
             throw new IllegalStateException("訂單狀態不允許結算");
         }
 
-        // Group items by user
-        List<OrderItem> items = orderItemMapper.selectList(
-                new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId)
-        );
-        Map<String, Long> userTotals = items.stream()
-                .collect(Collectors.groupingBy(OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
-
-        // CAS debit each user
-        for (Map.Entry<String, Long> entry : userTotals.entrySet()) {
-            String userId = entry.getKey();
-            long amount = entry.getValue();
-
-            int affected = userMapper.casDebit(userId, amount);
-            if (affected == 0) {
-                order.setStatus(OrderStatus.FAILED);
-                orderMapper.updateById(order);
-                throw new InsufficientBalanceException(userId + " 餘額不足");
-            }
-
-            // Read new balance and insert transaction
-            User user = userMapper.selectById(userId);
-            Transaction txn = new Transaction();
-            txn.setTransactionId(UUID.randomUUID().toString());
-            txn.setUserId(userId);
-            txn.setOrderId(orderId);
-            txn.setAmount(Math.toIntExact(amount));
-            txn.setClosingBalance(user.getBalance().intValue());
-            txn.setType(TradeType.DEBIT);
-            txn.setCreatedBy(order.getCreatedBy());
-            transactionMapper.insert(txn);
+        try {
+            paymentService.executePayment(order);
+        } catch (InsufficientBalanceException e) {
+            // Set FAILED outside the rolled-back transaction
+            order.setStatus(OrderStatus.FAILED);
+            orderMapper.updateById(order);
+            throw e;
         }
-
-        order.setStatus(OrderStatus.SETTLED);
-        orderMapper.updateById(order);
     }
 }
