@@ -1,6 +1,5 @@
 package com.example.orderSystem.service;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.orderSystem.dto.request.LoginRequest;
 import com.example.orderSystem.dto.request.RefreshRequest;
 import com.example.orderSystem.dto.response.LoginResponse;
