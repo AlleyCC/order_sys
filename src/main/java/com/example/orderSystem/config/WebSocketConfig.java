@@ -1,5 +1,6 @@
 package com.example.orderSystem.config;
 
+import com.example.orderSystem.service.TokenRedisService;
 import com.example.orderSystem.util.JwtUtils;
 import io.jsonwebtoken.Claims;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +28,7 @@ import java.util.List;
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtUtils jwtUtils;
+    private final TokenRedisService tokenRedisService;
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry config) {
@@ -53,6 +55,10 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                     }
                     try {
                         Claims claims = jwtUtils.parseToken(token.substring(7));
+                        String jti = claims.getId();
+                        if (jti != null && tokenRedisService.isAccessTokenBlacklisted(jti)) {
+                            throw new MessageDeliveryException("Token 已被登出");
+                        }
                         String userId = claims.getSubject();
                         String role = claims.get("role", String.class);
                         var authorities = List.of(new SimpleGrantedAuthority("ROLE_" + role.toUpperCase()));

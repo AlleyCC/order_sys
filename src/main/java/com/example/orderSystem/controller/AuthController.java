@@ -41,11 +41,15 @@ public class AuthController {
     }
 
     @PostMapping("/login/logout")
-    public ResponseEntity<Map<String, String>> logout(@RequestBody Map<String, String> body) {
+    public ResponseEntity<Map<String, String>> logout(
+            @RequestHeader(value = "Authorization", required = false) String authorization,
+            @RequestBody Map<String, String> body) {
         String refreshToken = body.get("refreshToken");
-        if (refreshToken != null) {
-            authService.logout(refreshToken);
+        String accessToken = null;
+        if (authorization != null && authorization.startsWith("Bearer ")) {
+            accessToken = authorization.substring(7);
         }
+        authService.logout(refreshToken, accessToken);
         return ResponseEntity.ok(Map.of("message", "登出成功"));
     }
 }

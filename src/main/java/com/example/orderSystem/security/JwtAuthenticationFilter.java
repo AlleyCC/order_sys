@@ -1,5 +1,6 @@
 package com.example.orderSystem.security;
 
+import com.example.orderSystem.service.TokenRedisService;
 import com.example.orderSystem.util.JwtUtils;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
@@ -23,6 +24,7 @@ import java.util.List;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtUtils jwtUtils;
+    private final TokenRedisService tokenRedisService;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -33,6 +35,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String token = header.substring(7);
             try {
                 Claims claims = jwtUtils.parseToken(token);
+                String jti = claims.getId();
+
+                if (jti != null && tokenRedisService.isAccessTokenBlacklisted(jti)) {
+                    // Token has been revoked via logout
+                    filterChain.doFilter(request, response);
+                    return;
+                }
+
                 String userId = claims.getSubject();
                 String role = claims.get("role", String.class);
 

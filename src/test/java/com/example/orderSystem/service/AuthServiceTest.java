@@ -4,13 +4,12 @@ import com.example.orderSystem.dto.request.LoginRequest;
 import com.example.orderSystem.dto.request.RefreshRequest;
 import com.example.orderSystem.dto.response.LoginResponse;
 import com.example.orderSystem.dto.response.RefreshResponse;
-import com.example.orderSystem.entity.RefreshToken;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.exception.AuthenticationException;
-import com.example.orderSystem.mapper.RefreshTokenMapper;
 import com.example.orderSystem.mapper.UserMapper;
 import com.example.orderSystem.util.JwtUtils;
 import com.example.orderSystem.util.PasswordUtils;
+import io.jsonwebtoken.Claims;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -22,11 +21,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.time.LocalDateTime;
-
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -39,13 +35,13 @@ class AuthServiceTest {
     private UserMapper userMapper;
 
     @Mock
-    private RefreshTokenMapper refreshTokenMapper;
-
-    @Mock
     private JwtUtils jwtUtils;
 
     @Mock
     private PasswordUtils passwordUtils;
+
+    @Mock
+    private TokenRedisService tokenRedisService;
 
     private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
 
@@ -76,15 +72,6 @@ class AuthServiceTest {
         return req;
     }
 
-    private RefreshToken createRefreshToken(String tokenId, String userId, boolean revoked, LocalDateTime expireTime) {
-        RefreshToken rt = new RefreshToken();
-        rt.setTokenId(tokenId);
-        rt.setUserId(userId);
-        rt.setRevoked(revoked);
-        rt.setExpireTime(expireTime);
-        return rt;
-    }
-
     // ========== Login ==========
 
     @Nested
@@ -92,20 +79,19 @@ class AuthServiceTest {
     class Login {
 
         @Test
-        @DisplayName("成功 → 回傳 accessToken + refreshToken + expiresIn")
+        @DisplayName("成功 → 回傳 accessToken + refreshToken + expiresIn, 並存入 Redis")
         void success() throws Exception {
             User user = createUser("alice", "test1234");
             when(passwordUtils.decryptPassword("encrypted")).thenReturn("test1234");
             when(userMapper.selectById("alice")).thenReturn(user);
             when(jwtUtils.generateAccessToken("alice", "employee")).thenReturn("jwt-token");
-            when(refreshTokenMapper.insert((RefreshToken) any())).thenReturn(1);
 
             LoginResponse resp = authService.login(loginRequest("alice"), "encrypted");
 
             assertThat(resp.getAccessToken()).isEqualTo("jwt-token");
             assertThat(resp.getRefreshToken()).isNotBlank();
             assertThat(resp.getExpiresIn()).isEqualTo(900);
-            verify(refreshTokenMapper).insert((RefreshToken) any());
+            verify(tokenRedisService).saveRefreshToken(anyString(), eq("alice"), eq(604800L));
         }
 
         @Test
@@ -151,9 +137,8 @@ class AuthServiceTest {
         @Test
         @DisplayName("成功 → 回傳新 accessToken")
         void success() {
-            RefreshToken rt = createRefreshToken("rt-001", "alice", false, LocalDateTime.now().plusDays(1));
             User user = createUser("alice", "pw");
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
+            when(tokenRedisService.getRefreshTokenUserId("rt-001")).thenReturn("alice");
             when(userMapper.selectById("alice")).thenReturn(user);
             when(jwtUtils.generateAccessToken("alice", "employee")).thenReturn("new-jwt");
 
@@ -164,9 +149,9 @@ class AuthServiceTest {
         }
 
         @Test
-        @DisplayName("token 不存在 → AuthenticationException")
+        @DisplayName("token 不存在（Redis 回傳 null）→ AuthenticationException")
         void tokenNotFound() {
-            when(refreshTokenMapper.selectById("bad")).thenReturn(null);
+            when(tokenRedisService.getRefreshTokenUserId("bad")).thenReturn(null);
 
             assertThatThrownBy(() -> authService.refresh(refreshRequest("bad")))
                     .isInstanceOf(AuthenticationException.class)
@@ -174,32 +159,9 @@ class AuthServiceTest {
         }
 
         @Test
-        @DisplayName("token 已 revoke → AuthenticationException")
-        void tokenRevoked() {
-            RefreshToken rt = createRefreshToken("rt-001", "alice", true, LocalDateTime.now().plusDays(1));
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
-
-            assertThatThrownBy(() -> authService.refresh(refreshRequest("rt-001")))
-                    .isInstanceOf(AuthenticationException.class)
-                    .hasMessage("Refresh Token 已失效");
-        }
-
-        @Test
-        @DisplayName("token 已過期 → AuthenticationException")
-        void tokenExpired() {
-            RefreshToken rt = createRefreshToken("rt-001", "alice", false, LocalDateTime.now().minusDays(1));
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
-
-            assertThatThrownBy(() -> authService.refresh(refreshRequest("rt-001")))
-                    .isInstanceOf(AuthenticationException.class)
-                    .hasMessage("Refresh Token 已失效");
-        }
-
-        @Test
         @DisplayName("user 不存在（被刪除）→ AuthenticationException")
         void userDeleted() {
-            RefreshToken rt = createRefreshToken("rt-001", "deleted-user", false, LocalDateTime.now().plusDays(1));
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
+            when(tokenRedisService.getRefreshTokenUserId("rt-001")).thenReturn("deleted-user");
             when(userMapper.selectById("deleted-user")).thenReturn(null);
 
             assertThatThrownBy(() -> authService.refresh(refreshRequest("rt-001")))
@@ -215,37 +177,50 @@ class AuthServiceTest {
     class Logout {
 
         @Test
-        @DisplayName("成功 → revoked 設為 true")
+        @DisplayName("成功 → blacklist access token + 刪除 refresh token")
         void success() {
-            RefreshToken rt = createRefreshToken("rt-001", "alice", false, LocalDateTime.now().plusDays(1));
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
-            when(refreshTokenMapper.updateById((RefreshToken) any())).thenReturn(1);
+            Claims claims = mock(Claims.class);
+            when(claims.getId()).thenReturn("jti-123");
+            when(jwtUtils.parseToken("access-token")).thenReturn(claims);
+            when(jwtUtils.getRemainingSeconds(claims)).thenReturn(600L);
 
-            authService.logout("rt-001");
+            authService.logout("rt-001", "access-token");
 
-            assertThat(rt.getRevoked()).isTrue();
-            verify(refreshTokenMapper).updateById((RefreshToken) any());
+            verify(tokenRedisService).blacklistAccessToken("jti-123", 600L);
+            verify(tokenRedisService).deleteRefreshToken("rt-001");
         }
 
         @Test
-        @DisplayName("token 不存在 → 不拋錯（靜默處理）")
-        void tokenNotFound() {
-            when(refreshTokenMapper.selectById("bad")).thenReturn(null);
+        @DisplayName("access token 已過期 → 不拋錯，仍刪除 refresh token")
+        void expiredAccessToken() {
+            when(jwtUtils.parseToken("expired-token")).thenThrow(new RuntimeException("expired"));
 
-            assertThatCode(() -> authService.logout("bad"))
+            assertThatCode(() -> authService.logout("rt-001", "expired-token"))
                     .doesNotThrowAnyException();
-            verify(refreshTokenMapper, never()).updateById((RefreshToken) any());
+            verify(tokenRedisService).deleteRefreshToken("rt-001");
         }
 
         @Test
-        @DisplayName("token 已 revoke → 不重複更新")
-        void alreadyRevoked() {
-            RefreshToken rt = createRefreshToken("rt-001", "alice", true, LocalDateTime.now().plusDays(1));
-            when(refreshTokenMapper.selectById("rt-001")).thenReturn(rt);
+        @DisplayName("access token 為 null → 只刪除 refresh token")
+        void nullAccessToken() {
+            authService.logout("rt-001", null);
 
-            authService.logout("rt-001");
+            verify(tokenRedisService, never()).blacklistAccessToken(anyString(), anyLong());
+            verify(tokenRedisService).deleteRefreshToken("rt-001");
+        }
 
-            verify(refreshTokenMapper, never()).updateById((RefreshToken) any());
+        @Test
+        @DisplayName("refresh token 為 null → 只 blacklist access token")
+        void nullRefreshToken() {
+            Claims claims = mock(Claims.class);
+            when(claims.getId()).thenReturn("jti-456");
+            when(jwtUtils.parseToken("access-token")).thenReturn(claims);
+            when(jwtUtils.getRemainingSeconds(claims)).thenReturn(300L);
+
+            authService.logout(null, "access-token");
+
+            verify(tokenRedisService).blacklistAccessToken("jti-456", 300L);
+            verify(tokenRedisService, never()).deleteRefreshToken(anyString());
         }
     }
 }

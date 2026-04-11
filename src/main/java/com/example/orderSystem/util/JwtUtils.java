@@ -15,6 +15,7 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.Date;
+import java.util.UUID;
 
 @Component
 public class JwtUtils {
@@ -42,6 +43,7 @@ public class JwtUtils {
         Date expiry = new Date(now.getTime() + accessExpiresSeconds * 1000);
 
         return Jwts.builder()
+                .id(UUID.randomUUID().toString())
                 .subject(userId)
                 .claim("role", role)
                 .issuedAt(now)
@@ -56,6 +58,16 @@ public class JwtUtils {
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
+    }
+
+    public String extractJti(String token) {
+        return parseToken(token).getId();
+    }
+
+    public long getRemainingSeconds(Claims claims) {
+        long expiryMillis = claims.getExpiration().getTime();
+        long remaining = (expiryMillis - System.currentTimeMillis()) / 1000;
+        return Math.max(remaining, 0);
     }
 
     private PrivateKey loadPrivateKey(String path) throws Exception {

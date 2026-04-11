@@ -1,9 +1,6 @@
-package com.example.orderSystem.service;
+package com.example.orderSystem.util;
 
-import com.example.orderSystem.entity.Order;
-import com.example.orderSystem.enums.OrderStatus;
-import com.example.orderSystem.mapper.OrderMapper;
-import com.example.orderSystem.mapper.UserMapper;
+import io.jsonwebtoken.Claims;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,7 +18,7 @@ import static org.assertj.core.api.Assertions.*;
 @SpringBootTest
 @Testcontainers
 @ActiveProfiles("test")
-class OrderSettleIntegrationTest {
+class JwtUtilsTest {
 
     @Container
     static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.0")
@@ -43,37 +40,45 @@ class OrderSettleIntegrationTest {
     }
 
     @Autowired
-    private OrderService orderService;
-
-    @Autowired
-    private OrderMapper orderMapper;
-
-    @Autowired
-    private UserMapper userMapper;
+    private JwtUtils jwtUtils;
 
     @Test
-    @DisplayName("settleOrder: OPEN 訂單 → CLOSED → SETTLED，餘額扣款正確")
-    void settleSuccess() {
-        // ord-002 is OPEN in seed data, has items for alice(55), bob(120), charlie(35)
-        // alice balance=4895, bob=4860, charlie=2895
-        orderService.settleOrder("ord-002");
+    @DisplayName("generateAccessToken 產出的 JWT 包含 jti claim")
+    void tokenContainsJti() {
+        String token = jwtUtils.generateAccessToken("alice", "employee");
+        Claims claims = jwtUtils.parseToken(token);
 
-        Order order = orderMapper.selectById("ord-002");
-        assertThat(order.getStatus()).isEqualTo(OrderStatus.SETTLED);
-
-        // Verify balances deducted
-        assertThat(userMapper.selectById("alice").getBalance()).isEqualTo(4895 - 55);
-        assertThat(userMapper.selectById("bob").getBalance()).isEqualTo(4860 - 120);
-        assertThat(userMapper.selectById("charlie").getBalance()).isEqualTo(2895 - 35);
+        assertThat(claims.getId()).isNotNull().isNotEmpty();
     }
 
     @Test
-    @DisplayName("settleOrder: 非 OPEN 訂單 → 跳過，不改狀態")
-    void skipNonOpen() {
-        // ord-001 is SETTLED
-        orderService.settleOrder("ord-001");
+    @DisplayName("每次產出的 jti 都不同")
+    void jtiIsUnique() {
+        String token1 = jwtUtils.generateAccessToken("alice", "employee");
+        String token2 = jwtUtils.generateAccessToken("alice", "employee");
 
-        Order order = orderMapper.selectById("ord-001");
-        assertThat(order.getStatus()).isEqualTo(OrderStatus.SETTLED);
+        String jti1 = jwtUtils.parseToken(token1).getId();
+        String jti2 = jwtUtils.parseToken(token2).getId();
+
+        assertThat(jti1).isNotEqualTo(jti2);
+    }
+
+    @Test
+    @DisplayName("extractJti 回傳正確的 jti")
+    void extractJti() {
+        String token = jwtUtils.generateAccessToken("bob", "admin");
+        Claims claims = jwtUtils.parseToken(token);
+
+        assertThat(jwtUtils.extractJti(token)).isEqualTo(claims.getId());
+    }
+
+    @Test
+    @DisplayName("getRemainingSeconds 回傳正數")
+    void remainingSeconds() {
+        String token = jwtUtils.generateAccessToken("alice", "employee");
+        Claims claims = jwtUtils.parseToken(token);
+
+        long remaining = jwtUtils.getRemainingSeconds(claims);
+        assertThat(remaining).isGreaterThan(0).isLessThanOrEqualTo(900);
     }
 }

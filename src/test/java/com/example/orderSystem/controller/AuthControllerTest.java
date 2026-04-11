@@ -15,6 +15,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -44,11 +45,17 @@ class AuthControllerTest {
             .withUsername("root")
             .withPassword("test");
 
+    @Container
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine")
+            .withExposedPorts(6379);
+
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", mysql::getJdbcUrl);
         registry.add("spring.datasource.username", mysql::getUsername);
         registry.add("spring.datasource.password", mysql::getPassword);
+        registry.add("spring.data.redis.host", redis::getHost);
+        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
     }
 
     @Autowired
@@ -219,6 +226,29 @@ class AuthControllerTest {
             mockMvc.perform(post("/auth/refresh")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"refreshToken\":\"" + login.getRefreshToken() + "\"}"))
+                    .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("登出 → access token 立即失效（blacklist）")
+        void logoutThenAccessTokenBlacklisted() throws Exception {
+            LoginResponse login = doLogin();
+
+            // Access token works before logout
+            mockMvc.perform(get("/user/get_user_transaction_record")
+                            .header("Authorization", "Bearer " + login.getAccessToken()))
+                    .andExpect(status().is(not(401)));
+
+            // Logout
+            mockMvc.perform(post("/login/logout")
+                            .header("Authorization", "Bearer " + login.getAccessToken())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"refreshToken\":\"" + login.getRefreshToken() + "\"}"))
+                    .andExpect(status().isOk());
+
+            // Access token should be rejected after logout
+            mockMvc.perform(get("/user/get_user_transaction_record")
+                            .header("Authorization", "Bearer " + login.getAccessToken()))
                     .andExpect(status().isUnauthorized());
         }
     }
