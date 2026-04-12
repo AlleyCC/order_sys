@@ -9,7 +9,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.eq;
@@ -22,15 +21,15 @@ class NotificationServiceTest {
     private NotificationService notificationService;
 
     @Mock
-    private SimpMessagingTemplate messagingTemplate;
+    private NotificationPublisher publisher;
 
     @Test
-    @DisplayName("sendBalanceUpdate → 發送到 /user/queue/balance")
+    @DisplayName("sendBalanceUpdate → publish 到 /queue/balance")
     void sendBalanceUpdate() {
         notificationService.sendBalanceUpdate("alice", 4840, "下單：珍珠奶茶(大) x1");
 
         ArgumentCaptor<BalanceMessage> captor = ArgumentCaptor.forClass(BalanceMessage.class);
-        verify(messagingTemplate).convertAndSendToUser(eq("alice"), eq("/queue/balance"), captor.capture());
+        verify(publisher).publish(eq("alice"), eq("/queue/balance"), captor.capture());
 
         BalanceMessage msg = captor.getValue();
         assertThat(msg.getAvailableBalance()).isEqualTo(4840);
@@ -38,12 +37,12 @@ class NotificationServiceTest {
     }
 
     @Test
-    @DisplayName("sendSettlementSuccess → 發送 SETTLED 通知")
+    @DisplayName("sendSettlementSuccess → publish SETTLED 通知")
     void sendSettlementSuccess() {
         notificationService.sendSettlementSuccess("alice", "ord-001", "午餐團", 105, 4895);
 
         ArgumentCaptor<SettlementMessage> captor = ArgumentCaptor.forClass(SettlementMessage.class);
-        verify(messagingTemplate).convertAndSendToUser(eq("alice"), eq("/queue/notification"), captor.capture());
+        verify(publisher).publish(eq("alice"), eq("/queue/notification"), captor.capture());
 
         SettlementMessage msg = captor.getValue();
         assertThat(msg.getResult()).isEqualTo("SETTLED");
@@ -52,12 +51,12 @@ class NotificationServiceTest {
     }
 
     @Test
-    @DisplayName("sendSettlementFailed → 發送 FAILED 通知")
+    @DisplayName("sendSettlementFailed → publish FAILED 通知")
     void sendSettlementFailed() {
         notificationService.sendSettlementFailed("alice", "ord-001", "午餐團");
 
         ArgumentCaptor<SettlementMessage> captor = ArgumentCaptor.forClass(SettlementMessage.class);
-        verify(messagingTemplate).convertAndSendToUser(eq("alice"), eq("/queue/notification"), captor.capture());
+        verify(publisher).publish(eq("alice"), eq("/queue/notification"), captor.capture());
 
         SettlementMessage msg = captor.getValue();
         assertThat(msg.getResult()).isEqualTo("FAILED");

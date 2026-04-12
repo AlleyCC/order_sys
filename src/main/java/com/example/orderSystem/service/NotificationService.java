@@ -3,23 +3,21 @@ package com.example.orderSystem.service;
 import com.example.orderSystem.dto.websocket.BalanceMessage;
 import com.example.orderSystem.dto.websocket.SettlementMessage;
 import lombok.RequiredArgsConstructor;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
 public class NotificationService {
 
-    private final SimpMessagingTemplate messagingTemplate;
+    private final NotificationPublisher publisher;
 
     public void sendBalanceUpdate(String userId, long availableBalance, String reason) {
-        messagingTemplate.convertAndSendToUser(
-                userId, "/queue/balance", new BalanceMessage(availableBalance, reason));
+        publisher.publish(userId, "/queue/balance", new BalanceMessage(availableBalance, reason));
     }
 
     public void sendSettlementSuccess(String userId, String orderId, String orderName,
                                       int amount, long balance) {
-        messagingTemplate.convertAndSendToUser(userId, "/queue/notification",
+        publisher.publish(userId, "/queue/notification",
                 SettlementMessage.builder()
                         .orderId(orderId)
                         .orderName(orderName)
@@ -30,7 +28,7 @@ public class NotificationService {
     }
 
     public void sendSettlementFailed(String userId, String orderId, String orderName) {
-        messagingTemplate.convertAndSendToUser(userId, "/queue/notification",
+        publisher.publish(userId, "/queue/notification",
                 SettlementMessage.builder()
                         .orderId(orderId)
                         .orderName(orderName)
