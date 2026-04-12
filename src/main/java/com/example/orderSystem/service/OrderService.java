@@ -11,7 +11,7 @@ import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
-import com.example.orderSystem.scheduler.OrderSettlementQueue;
+import com.example.orderSystem.scheduler.RedisSettlementQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,7 +33,7 @@ public class OrderService {
     private final OrderItemMapper orderItemMapper;
     private final MenuMapper menuMapper;
     private final UserMapper userMapper;
-    private final OrderSettlementQueue settlementQueue;
+    private final RedisSettlementQueue settlementQueue;
     private final PaymentService paymentService;
     private final NotificationService notificationService;
 

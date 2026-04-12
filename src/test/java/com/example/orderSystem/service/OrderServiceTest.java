@@ -9,7 +9,7 @@ import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.TradeType;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
-import com.example.orderSystem.scheduler.OrderSettlementQueue;
+import com.example.orderSystem.scheduler.RedisSettlementQueue;
 import com.example.orderSystem.service.PaymentService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -47,7 +47,7 @@ class OrderServiceTest {
     @Mock
     private TransactionMapper transactionMapper;
     @Mock
-    private OrderSettlementQueue settlementQueue;
+    private RedisSettlementQueue settlementQueue;
     @Mock
     private PaymentService paymentService;
     @Mock

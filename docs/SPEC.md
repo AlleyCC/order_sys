@@ -96,7 +96,7 @@ Client (REST + WebSocket)
 ### 2.4 登出機制
 
 - `POST /login/logout` 將當前 Refresh Token 標記為 revoked（`refresh_tokens.revoked = 1`）
-- 舊 Access Token 最多 15 分鐘後自然過期（空窗期可接受：內部系統、低風險）
+- 舊 Access Token 最多 15 分鐘後自然過期
 - Refresh Token 被 revoke 後，無法再換發新 Access Token
 
 ### 2.5 受保護的 API 路徑
@@ -142,7 +142,7 @@ parent-directory/
 | `../key/password_private.key` | 登入密碼 RSA 解密 |
 | `../key/password_public.key` | 登入密碼 RSA 加密 (Client 端使用) |
 
-金鑰路徑透過 `application.properties` 設定，不寫死在程式碼中：
+金鑰路徑透過 `application.properties` 設定：
 
 ```properties
 app.jwt.private-key=../key/private_key.pem
@@ -767,27 +767,33 @@ OPEN ──→ CLOSED ──→ SETTLED
 ```
 src/main/java/com/example/orderSystem/
 ├── OrderSystemApplication.java          # @SpringBootApplication + @MapperScan
+├── aspect/
+│   └── ApiAccessLogAspect.java          # AOP API 存取日誌 (切面)
 ├── config/
+│   ├── MyBatisPlusConfig.java           # MyBatis-Plus 設定 (分頁插件等)
 │   ├── SecurityConfig.java              # Spring Security + JWT Filter 設定
 │   └── WebSocketConfig.java             # WebSocket STOMP 設定
 ├── security/
 │   └── JwtAuthenticationFilter.java     # JWT 驗證 Filter (OncePerRequestFilter)
 ├── controller/
-│   ├── AuthController.java              # 認證 API (login/logout)
+│   ├── AuthController.java              # 認證 API (login/logout/refresh)
 │   ├── OrderController.java             # 訂單 API
 │   └── UserController.java              # 使用者 API
 ├── service/
-│   ├── AuthService.java
-│   ├── OrderService.java
-│   └── UserService.java
+│   ├── AuthService.java                 # 認證業務邏輯
+│   ├── NotificationService.java         # WebSocket 通知推送
+│   ├── OrderService.java                # 訂單業務邏輯
+│   ├── PaymentService.java              # 結算扣款邏輯
+│   ├── TokenRedisService.java           # Redis Token 黑名單管理
+│   └── UserService.java                 # 使用者業務邏輯
 ├── mapper/
-│   ├── UserMapper.java                  # extends BaseMapper<User>
+│   ├── UserMapper.java                  # extends BaseMapper<User> + 自訂 XML
 │   ├── StoreMapper.java                 # extends BaseMapper<Store>
 │   ├── MenuMapper.java                  # extends BaseMapper<Menu>
 │   ├── OrderMapper.java                 # extends BaseMapper<Order> + 自訂 XML
-│   ├── OrderItemMapper.java             # extends BaseMapper<OrderItem>
+│   ├── OrderItemMapper.java             # extends BaseMapper<OrderItem> + 自訂 XML
 │   ├── TransactionMapper.java           # extends BaseMapper<Transaction>
-│   └── RefreshTokenMapper.java           # extends BaseMapper<RefreshToken>
+│   └── RefreshTokenMapper.java          # extends BaseMapper<RefreshToken>
 ├── entity/
 │   ├── User.java
 │   ├── Store.java
@@ -799,18 +805,27 @@ src/main/java/com/example/orderSystem/
 ├── dto/
 │   ├── request/                         # 請求 DTO (@Valid)
 │   │   ├── LoginRequest.java
+│   │   ├── RefreshRequest.java
 │   │   ├── CreateOrderRequest.java
 │   │   ├── CreateOrderItemRequest.java
 │   │   └── DeleteOrderItemRequest.java
-│   └── response/                        # 回應 DTO
-│       ├── OrderDetailResponse.java
-│       ├── OrderItemResponse.java
-│       └── TransactionResponse.java
+│   ├── response/                        # 回應 DTO
+│   │   ├── LoginResponse.java
+│   │   ├── RefreshResponse.java
+│   │   ├── OrderDetailResponse.java
+│   │   ├── OrderItemResponse.java
+│   │   └── TransactionResponse.java
+│   └── websocket/                       # WebSocket 訊息 DTO
+│       ├── BalanceMessage.java
+│       ├── ChatMessage.java
+│       └── SettlementMessage.java
 ├── enums/
 │   ├── OrderStatus.java
 │   └── TradeType.java
 ├── exception/
 │   ├── GlobalExceptionHandler.java      # @ControllerAdvice
+│   ├── AuthenticationException.java
+│   ├── ConflictException.java
 │   ├── ResourceNotFoundException.java
 │   ├── InsufficientBalanceException.java
 │   └── ForbiddenException.java
@@ -827,12 +842,26 @@ src/main/java/com/example/orderSystem/
 
 src/main/resources/
 ├── application.properties               # 應用設定 (含金鑰路徑)
+├── application-dev.properties           # 開發環境設定
 ├── mapper/                              # MyBatis XML Mapper
+│   ├── UserMapper.xml                   # 使用者相關查詢
 │   ├── OrderMapper.xml                  # 複雜 JOIN 查詢
-│   └── TransactionMapper.xml            # 餘額計算查詢
+│   └── OrderItemMapper.xml              # 品項相關查詢
 └── db/migration/
     ├── V1__init_schema.sql              # Flyway 初始 Schema + Seed Data
-    └── V2__schema_updates.sql           # balance, refresh_tokens, status/type VARCHAR, FK
+    ├── V2__schema_updates.sql           # balance, refresh_tokens, status/type VARCHAR, FK
+    └── V3__fix_seed_passwords.sql       # 修復種子資料密碼
+
+src/test/java/com/example/orderSystem/   # 測試目錄
+├── aspect/                              # AOP 測試
+├── controller/
+│   ├── AuthControllerTest.java
+│   ├── OrderControllerTest.java
+│   └── UserControllerTest.java
+├── service/
+│   └── OrderSettleIntegrationTest.java
+└── resources/
+    └── application-test.properties
 
 ../key/                                  # 金鑰目錄 (專案外，不納入版控)
 ├── private_key.pem
