@@ -1,178 +1,171 @@
-# PayPool - 團購訂單管理系統
+# PayPool — 團購訂單管理系統
 
-公司內部團購/合資訂單管理系統的後端 API 服務，提供使用者認證、訂單建立與管理、帳戶餘額管理、支付結算、即時通訊等功能。
+> 以 Java 25 + Spring Boot 3.5 打造的團購 / 合資訂單平台：多人開團下單、到時自動結算、跨實例即時通知。
 
-## 技術棧
+[![CI](https://github.com/AlleyCC/order_sys/actions/workflows/ci.yml/badge.svg)](https://github.com/AlleyCC/order_sys/actions/workflows/ci.yml)
+![Java](https://img.shields.io/badge/Java-25-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5.13-brightgreen)
+![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D)
 
-| 項目 | 說明 |
-|------|------|
-| 語言 | Java 25 |
-| 框架 | Spring Boot 3.5.13 |
-| 資料庫 | MySQL 8.0 (Docker) |
-| 資料存取 | MyBatis-Plus 3.5.12 |
-| 認證 | JWT RS256 (Access + Refresh Token) |
-| 即時通訊 | WebSocket (STOMP + SockJS) |
-| 排程 | Java DelayQueue |
-| 測試 | JUnit 5 + Mockito + Testcontainers |
+---
 
-## 前置需求
+## 架構概覽
 
-- Java 25+
-- Docker (MySQL container)
-- RSA key 檔案放在 `./key/` 目錄下
+```
+          ┌─────────────────────────────────────────┐
+          │         Client (Web / Mobile)           │
+          └────┬────────────────────────┬───────────┘
+               │ HTTP + JWT             │ WebSocket (STOMP / SockJS)
+               ▼                        ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │              Spring Boot 3.5  (port 8591)                    │
+ │                                                              │
+ │   JwtAuthFilter ─▶ Controller ─▶ Service ─▶ Mapper           │
+ │                         │                                    │
+ │                    @Around AOP                               │
+ │                    (access log)                              │
+ │                                                              │
+ │        ┌──────────┬─────────────┬──────────────┐             │
+ │        ▼          ▼             ▼              ▼             │
+ │     Mapper    TokenRedis    RedisSettle    NotificationPub   │
+ │    (MyBatis)   Service        Queue          (Pub/Sub)       │
+ │        │          │             │               │            │
+ └────────┼──────────┼─────────────┼───────────────┼────────────┘
+          │          │             │               │
+          ▼          ▼             ▼               ▼
+      ┌───────┐  ┌───────┐   ┌───────────┐   ┌──────────┐
+      │ MySQL │  │ Redis │   │ Scheduler │   │ WS Relay │
+      │  8.0  │  │   7   │   │ (consumer)│   │ → client │
+      └───────┘  └───────┘   └───────────┘   └──────────┘
+```
 
-## 快速啟動
+- **Controller** 透過 `@Around` AOP 統一記錄 access log（`ApiAccessLogAspect`）
+- **Token**（access blacklist + refresh session）存 Redis，走純 JWT 驗簽不查 DB
+- **結算隊列** 走 Redis delay queue，`RedisSettlementConsumer` 跨實例消費
+- **通知** 透過 Redis Pub/Sub 廣播，`RedisWebSocketRelay` 推送到對應 WS session
+
+---
+
+## 技術決策
+
+> 三個最能說故事的決策。完整演進紀錄可見 `openspec/changes/archive/`。
+
+### 1. Token 從 DB 遷到 Redis
+
+- **問題**：Refresh token 原本存 `refresh_tokens` 資料表，每個 API 請求都會驗 access token，高頻讀取壓垮 DB；且 access token 撤銷（登出）需要 DB 寫入。
+- **選擇**：Access token 黑名單 + Refresh token session 全部搬到 Redis，Key 帶 TTL 自動過期。
+- **為何**：Redis 天生支援 `EXPIRE`、讀寫延遲遠低於 MySQL；token 本質是短期快取資料而非事實資料。
+
+### 2. 結算隊列：in-memory `DelayQueue` → Redis delay queue
+
+- **問題**：原先以 Java `DelayQueue` 實作自動結算觸發，單機可行，但多實例部署時同一筆訂單會被多個 consumer 同時處理，且程式重啟會遺失隊列內容。
+- **選擇**：改用 Redis ZSET（score = 觸發時間），多實例用 `ZPOPMIN` 原子競爭取任務，重啟不遺失。
+- **為何**：延遲觸發 + 跨實例一致 + 持久化，Redis ZSET 正好滿足這三項。
+
+### 3. Access log 用 AOP 而不是 `@ControllerAdvice`
+
+- **問題**：要記錄每個 API 的耗時、參數、回應大小，`@ControllerAdvice` 只有 `@ExceptionHandler` / `ResponseBodyAdvice`，沒有 `@Around` 語義，取不到「方法進入 → 方法結束」的耗時差。
+- **選擇**：寫 `ApiAccessLogAspect` 以 `@Around` 切入 Controller 層，量測 `System.nanoTime()` 差。
+- **為何**：AOP 的 `@Around` 才能同時拿到方法執行前後的 timestamp；未來要擴到 Service 層也是同一個切面。
+
+---
+
+## Quick Start
 
 ```bash
-# 1. 啟動 MySQL (port 3307)
+# 1) 啟動依賴（MySQL 3307 + Redis 6379）
 docker compose up -d
 
-# 2. 編譯 + 啟動 (預設 dev profile, Flyway 自動執行 migration)
+# 2) 編譯（Flyway migration 會在啟動時自動執行）
 ./mvnw package -DskipTests
-java -jar target/orderSystem-0.0.1-SNAPSHOT.jar
 
-# App 啟動於 http://localhost:8591
+# 3) 執行
+java -jar target/orderSystem-0.0.1-SNAPSHOT.jar
 ```
 
-### Flyway 指令
+啟動後可直接瀏覽 **Swagger UI**：<http://localhost:8591/swagger-ui.html>
+
+> RSA key 需放置於 `./key/` 目錄（`private_key.pem`、`public_key.pem`、`password_private.key`、`password_public.key`）。CI 以 `openssl` 臨時生成；本機請自行產生。
+
+---
+
+## API 文件
+
+- **Swagger UI**：`/swagger-ui.html` — 啟動後可直接互動；右上「Authorize」按鈕貼入 access token 後可測受保護端點
+- **OpenAPI JSON**：`/v3/api-docs`
+- **完整規格書**：[`docs/SPEC.md`](docs/SPEC.md) — 包含商業邏輯與錯誤碼定義
+
+---
+
+## API 示例
+
+### 登入並取得 token
 
 ```bash
-./mvnw flyway:info       # 查看 migration 狀態
-./mvnw flyway:migrate    # 只跑 migration，不啟動 app
-./mvnw flyway:repair     # 修復 checksum 不一致
+# Authorization header 需帶 RSA 加密後的密碼（client-side 加密後 Base64）
+curl -X POST http://localhost:8591/login/create_token \
+  -H "Authorization: JWT <RSA_ENCRYPTED_PASSWORD_BASE64>" \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "alley"}'
 ```
 
-## API 規格
-
-完整 API 規格書請參考：[docs/SPEC.md](docs/SPEC.md)
-
-## Database Schema
-
-### ERD
-
-```mermaid
-erDiagram
-    users ||--o{ orders : "created_by (RESTRICT)"
-    users ||--o{ order_items : "user_id (RESTRICT)"
-    users ||--o{ transactions : "user_id (RESTRICT)"
-    users ||--o{ refresh_tokens : "user_id (CASCADE)"
-    stores ||--o{ orders : "store_id (RESTRICT)"
-    stores ||--o{ menus : "store_id (CASCADE)"
-    orders ||--o{ order_items : "order_id (CASCADE)"
-    orders ||--o{ transactions : "order_id (RESTRICT, nullable)"
-    menus ||--o{ order_items : "menu_id (RESTRICT)"
-
-    users {
-        varchar user_id PK
-        varchar user_name
-        varchar password
-        varchar role
-        bigint balance
-        datetime created_at
-        datetime updated_at
-    }
-    stores {
-        varchar store_id PK
-        varchar store_name
-        varchar phone
-        varchar address
-        int min_order_amount
-        datetime created_at
-        datetime updated_at
-    }
-    menus {
-        int menu_id PK "AUTO_INCREMENT"
-        varchar store_id FK
-        varchar product_name
-        int unit_price
-        tinyint is_available
-        datetime created_at
-        datetime updated_at
-    }
-    orders {
-        varchar order_id PK "UUID"
-        varchar store_id FK
-        varchar created_by FK
-        varchar order_name
-        varchar status "OPEN/CLOSED/SETTLED/CANCELLED/FAILED"
-        datetime deadline
-        datetime created_at
-        datetime updated_at
-    }
-    order_items {
-        int item_id PK "AUTO_INCREMENT"
-        varchar order_id FK
-        varchar user_id FK
-        int menu_id FK
-        varchar product_name "snapshot"
-        int unit_price "snapshot"
-        int quantity
-        int subtotal "GENERATED"
-        datetime created_at
-        datetime updated_at
-    }
-    transactions {
-        varchar transaction_id PK "UUID"
-        varchar user_id FK
-        varchar order_id FK "nullable"
-        int amount
-        int closing_balance
-        varchar type "DEBIT/RECHARGE"
-        varchar created_by
-        datetime created_at
-    }
-    refresh_tokens {
-        varchar token_id PK "UUID"
-        varchar user_id FK
-        tinyint revoked
-        datetime expire_time
-        datetime created_at
-    }
+Response:
+```json
+{
+  "accessToken":  "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGxleSIsInJvbGUiOiJtZW1iZXIi...",
+  "refreshToken": "550e8400-e29b-41d4-a716-446655440000"
+}
 ```
 
-### Tables
+### 建立團購訂單（需認證）
 
-| Table | 說明 | PK | 重要欄位 |
-|-------|------|----|---------|
-| users | 使用者 | user_id (VARCHAR) | balance (BIGINT), role |
-| stores | 店家 | store_id (VARCHAR) | min_order_amount |
-| menus | 菜單 | menu_id (AUTO_INCREMENT) | unit_price, is_available |
-| orders | 團購訂單 | order_id (UUID) | status (VARCHAR), deadline |
-| order_items | 訂單品項 | item_id (AUTO_INCREMENT) | subtotal (GENERATED) |
-| transactions | 交易紀錄 | transaction_id (UUID) | type (DEBIT/RECHARGE), closing_balance |
-| refresh_tokens | Refresh Token | token_id (UUID) | revoked, expire_time |
+```bash
+curl -X POST http://localhost:8591/order/create_order \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "storeId":   "store-001",
+        "orderName": "週五下午茶",
+        "deadline":  "2026-04-13T17:00:00"
+      }'
+```
 
-### Enums
+Response:
+```json
+{ "orderId": "b1a2c3d4-e5f6-7890-abcd-ef1234567890" }
+```
 
-**OrderStatus**: `OPEN` → `CLOSED` → `SETTLED` / `FAILED` / `CANCELLED`
+---
 
-**TradeType**: `DEBIT` (扣款) / `RECHARGE` (儲值)
+## 系統設計細節
 
-## 流程圖
-
-### 認證流程 (Access + Refresh Token)
+### 認證流程（Access + Refresh Token）
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
+    participant R as Redis
 
-    C->>S: POST /login/create_token<br/>Header: JWT {RSA加密密碼}<br/>Body: { userId }
+    C->>S: POST /login/create_token<br/>Header: JWT {RSA 加密密碼}
     S-->>S: RSA 解密 → BCrypt 驗證
-    S-->>C: { accessToken (15min), refreshToken (7d) }
+    S->>R: SET refresh:{jti} (TTL 7d)
+    S-->>C: { accessToken(15min), refreshToken(7d) }
 
-    C->>S: API calls<br/>Authorization: Bearer {accessToken}
-    S-->>S: 純 JWT 驗簽，不查 DB
+    C->>S: API call<br/>Authorization: Bearer {accessToken}
+    S-->>S: 純 JWT 驗簽
+    S->>R: GET blacklist:{jti}（未撤銷才放行）
     S-->>C: 200 OK
 
     Note over C,S: accessToken 過期
 
     C->>S: POST /auth/refresh<br/>{ refreshToken }
-    S-->>S: 查 DB: 未 revoke + 未過期
-    S-->>C: { accessToken (new) }
+    S->>R: GET refresh:{jti} + 驗未過期
+    S-->>C: { accessToken(new) }
 
-    C->>S: POST /login/logout<br/>{ refreshToken }
-    S-->>S: revoked = true
+    C->>S: POST /login/logout
+    S->>R: SET blacklist:{accessJti} + DEL refresh:{jti}
     S-->>C: 200 登出成功
 ```
 
@@ -180,9 +173,9 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    A["團主開團<br/>create_order<br/>status=OPEN"] --> B["會員下單/改單<br/>create_user_order<br/>檢查可用餘額<br/>WebSocket 推送餘額"]
-    B --> C["deadline 到達<br/>DelayQueue 觸發<br/>status=CLOSED<br/>自動嘗試扣款"]
-    C --> D["結算結果<br/>SETTLED / FAILED<br/>WebSocket 推送結果"]
+    A["團主開團<br/>create_order<br/>status=OPEN"] --> B["會員下單<br/>create_user_order<br/>餘額檢查<br/>WS 推送"]
+    B --> C["deadline 到<br/>Redis DelayQueue<br/>觸發 → CLOSED"]
+    C --> D["自動結算<br/>SETTLED / FAILED<br/>WS 推送結果"]
 ```
 
 ### 訂單狀態流轉
@@ -199,29 +192,22 @@ stateDiagram-v2
     CLOSED --> CANCELLED : 團主取消
 
     FAILED --> SETTLED : pay_order 重試
-
-    note right of OPEN
-        deadline 前可進行：
-        - create_user_order (下單)
-        - delete_user_order (刪除品項)
-        - 團購聊天 (WebSocket)
-    end note
 ```
 
-### 結算扣款流程 (CAS Pattern)
+### 結算扣款流程（CAS Pattern）
 
 ```mermaid
 flowchart TD
     A[payOrder] --> B{訂單狀態?}
     B -->|SETTLED| X1[409 已結算]
     B -->|OPEN| X2[400 尚未截止]
-    B -->|CLOSED / FAILED| C[依 user_id 分組<br/>加總 order_items.subtotal]
+    B -->|CLOSED / FAILED| C[依 user_id 分組<br/>加總 subtotal]
 
-    C --> D[對每位使用者執行 CAS 扣款<br/>UPDATE users SET balance = balance - amount<br/>WHERE user_id = ? AND balance >= ?]
+    C --> D[CAS 扣款<br/>UPDATE users SET balance = balance - amount<br/>WHERE user_id = ? AND balance >= ?]
 
     D --> E{affected_rows?}
     E -->|= 1| F[扣款成功<br/>寫入 transactions]
-    E -->|= 0| G[餘額不足<br/>ROLLBACK 所有扣款]
+    E -->|= 0| G[餘額不足<br/>ROLLBACK]
 
     F --> H{全部完成?}
     H -->|是| I[status = SETTLED]
@@ -230,7 +216,9 @@ flowchart TD
     G --> J[status = FAILED]
 ```
 
-### WebSocket 即時通訊
+> 餘額扣款以 SQL CAS（Compare-And-Swap）確保高併發下的一致性：`WHERE balance >= ?` 保證不會扣成負數，失敗即 rollback 整筆訂單。
+
+### WebSocket 訊息通道
 
 ```mermaid
 flowchart LR
@@ -241,37 +229,104 @@ flowchart LR
     WS --> CH["/topic/order/{orderId}/chat<br/>團購聊天（同訂單所有人）"]
 ```
 
+Multi-instance 下透過 **Redis Pub/Sub** 由 `RedisWebSocketRelay` 轉送到對應實例的 WS session。
+
+---
+
+## Database Schema
+
+```mermaid
+erDiagram
+    users ||--o{ orders : "created_by"
+    users ||--o{ order_items : "user_id"
+    users ||--o{ transactions : "user_id"
+    stores ||--o{ orders : "store_id"
+    stores ||--o{ menus : "store_id"
+    orders ||--o{ order_items : "order_id"
+    orders ||--o{ transactions : "order_id"
+    menus ||--o{ order_items : "menu_id"
+
+    users        { varchar user_id PK
+                   varchar user_name
+                   varchar role
+                   bigint  balance }
+    stores       { varchar store_id PK
+                   varchar store_name
+                   int     min_order_amount }
+    menus        { int     menu_id PK
+                   varchar store_id FK
+                   int     unit_price
+                   tinyint is_available }
+    orders       { varchar order_id PK
+                   varchar store_id FK
+                   varchar created_by FK
+                   varchar status "OPEN/CLOSED/SETTLED/..."
+                   datetime deadline }
+    order_items  { int     item_id PK
+                   varchar order_id FK
+                   varchar user_id FK
+                   int     menu_id FK
+                   int     quantity
+                   int     subtotal "GENERATED" }
+    transactions { varchar transaction_id PK
+                   varchar user_id FK
+                   int     amount
+                   int     closing_balance
+                   varchar type "DEBIT/RECHARGE" }
+```
+
+**Enums**
+- `OrderStatus`: `OPEN` → `CLOSED` → `SETTLED` / `FAILED` / `CANCELLED`
+- `TradeType`: `DEBIT`（扣款）/ `RECHARGE`（儲值）
+
+> Refresh token 原為 `refresh_tokens` 資料表，已遷移至 Redis（見「技術決策」#1）。
+
+---
+
 ## 測試
 
 ```bash
-./mvnw test                        # 全部測試
+./mvnw test                        # 全部測試（含 Testcontainers）
 ./mvnw test -Dtest=ClassName       # 單一 class
 ```
 
-| 類型 | 工具 | 說明 |
-|------|------|------|
-| Service 單元測試 | JUnit 5 + Mockito | Mock mapper，驗證業務邏輯 |
-| Controller 整合測試 | SpringBootTest + MockMvc + Testcontainers | 真實 MySQL，驗完整 HTTP 流程 |
+| 類型 | 工具 | 用途 |
+|---|---|---|
+| Service 單元測試 | JUnit 5 + Mockito | mock mapper，驗業務邏輯 |
+| Controller 整合測試 | `@SpringBootTest` + MockMvc + Testcontainers | 真實 MySQL + Redis，驗完整 HTTP 流程 |
+| Mapper 整合測試 | `@MybatisPlusTest` + Testcontainers | 驗複雜 SQL / XML query |
+
+開發遵循 **TDD**：先寫測試（RED）→ 實作通過（GREEN）→ 重構（REFACTOR）。
+
+---
 
 ## 專案結構
 
 ```
 src/main/java/com/example/orderSystem/
-├── config/          # Spring 配置 (Security, WebSocket, MyBatisPlus)
-├── controller/      # REST API endpoints
-├── service/         # 業務邏輯
-├── mapper/          # MyBatis-Plus mappers
-├── entity/          # 資料庫實體
-├── dto/             # Request/Response DTOs
-├── enums/           # OrderStatus, TradeType
-├── exception/       # 全域例外處理 (RFC 7807)
-├── scheduler/       # DelayQueue 自動結算
-├── security/        # JWT Authentication Filter
-├── websocket/       # 聊天 STOMP handler
-└── util/            # JWT, RSA, BCrypt 工具
+├── aspect/         # AOP access log
+├── config/         # Security, WebSocket, MyBatisPlus, OpenAPI
+├── controller/     # REST endpoints
+├── service/        # 業務邏輯 + Redis / Pub/Sub
+├── mapper/         # MyBatis-Plus mappers
+├── scheduler/      # Redis delay queue consumer
+├── security/       # JWT Authentication Filter
+├── websocket/      # STOMP handler + Redis relay
+└── util/           # JWT / RSA / BCrypt
 
 src/main/resources/
-├── db/migration/    # Flyway migrations (V1, V2, V3)
-├── mapper/          # MyBatis XML (JOIN queries)
-└── application*.properties
+├── db/migration/   # Flyway migrations
+└── mapper/         # MyBatis XML
 ```
+
+---
+
+## 相關文件
+
+- [`docs/SPEC.md`](docs/SPEC.md) — 完整 API 規格 + 商業規則
+- [`openspec/`](openspec/) — Change proposals / designs / specs
+- [`CLAUDE.md`](CLAUDE.md) — 開發者操作指令（Flyway、DB reset 等）
+
+## 作者
+
+[@AlleyCC](https://github.com/AlleyCC)
