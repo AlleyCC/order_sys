@@ -9,12 +9,12 @@ import com.example.orderSystem.service.OrderService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
@@ -61,8 +61,7 @@ public class OrderController {
     @Operation(summary = "建立新團購訂單")
     public ResponseEntity<Map<String, String>> createOrder(
             @Valid @RequestBody CreateOrderRequest request,
-            HttpServletRequest httpRequest) {
-        String userId = (String) httpRequest.getAttribute("userId");
+            @AuthenticationPrincipal String userId) {
         return ResponseEntity.status(HttpStatus.CREATED).body(orderService.createOrder(request, userId));
     }
 
@@ -70,8 +69,7 @@ public class OrderController {
     @Operation(summary = "加入已開啟的團購訂單（下單品項）")
     public ResponseEntity<Map<String, String>> createUserOrder(
             @Valid @RequestBody CreateOrderItemRequest request,
-            HttpServletRequest httpRequest) {
-        String userId = (String) httpRequest.getAttribute("userId");
+            @AuthenticationPrincipal String userId) {
         orderService.createUserOrder(request, userId);
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("message", "下單成功"));
     }
@@ -80,8 +78,7 @@ public class OrderController {
     @Operation(summary = "刪除自己的品項；管理員可刪除他人")
     public ResponseEntity<Map<String, String>> deleteUserOrder(
             @Valid @RequestBody DeleteOrderItemRequest request,
-            HttpServletRequest httpRequest) {
-        String userId = (String) httpRequest.getAttribute("userId");
+            @AuthenticationPrincipal String userId) {
         orderService.deleteUserOrder(request, userId, getCurrentRole());
         return ResponseEntity.ok(Map.of("message", "刪除成功"));
     }
@@ -90,8 +87,7 @@ public class OrderController {
     @Operation(summary = "取消整筆訂單（限訂單發起人或管理員）")
     public ResponseEntity<Map<String, String>> cancelOrder(
             @RequestBody Map<String, String> body,
-            HttpServletRequest httpRequest) {
-        String userId = (String) httpRequest.getAttribute("userId");
+            @AuthenticationPrincipal String userId) {
         orderService.cancelOrder(body.get("orderId"), userId, getCurrentRole());
         return ResponseEntity.ok(Map.of("message", "訂單已取消"));
     }

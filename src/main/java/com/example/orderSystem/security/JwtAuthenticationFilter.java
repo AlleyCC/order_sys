@@ -50,6 +50,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 var auth = new UsernamePasswordAuthenticationToken(userId, null, authorities);
                 SecurityContextHolder.getContext().setAuthentication(auth);
 
+                // Controller 已改用 @AuthenticationPrincipal 取 userId(principal)。
+                // 此 attribute 暫留給尚未重構的 CategoryController(merge feat/category-create 後一併移除)。
                 request.setAttribute("userId", userId);
             } catch (ExpiredJwtException e) {
                 // Token expired — don't set authentication, let Spring Security handle 401
