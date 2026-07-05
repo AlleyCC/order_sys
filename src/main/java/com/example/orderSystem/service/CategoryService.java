@@ -32,8 +32,6 @@ public class CategoryService {
         category.setSortOrder(request.getSortOrder());
         category.setIsDeleted(0);
         category.setCreatedBy(operator);
-        // 3. categoryMapper.insert(...) 並回傳寫入的 entity
-        // 現在故意留空,讓測試 RED。
         categoryMapper.insert(category);
         return category;
     }

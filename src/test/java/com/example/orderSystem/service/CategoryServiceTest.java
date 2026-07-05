@@ -8,10 +8,12 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -37,7 +39,7 @@ class CategoryServiceTest {
     class CreateCategory {
 
         @Test
-        @DisplayName("管理員新增分類成功 → 會檢查同名並寫入一筆")
+        @DisplayName("管理員新增分類成功 → 檢查同名後,寫入的 Category 欄位正確")
         void adminCreatesCategory() {
             // Arrange:沒有同名 → count 回 0
             when(categoryMapper.selectCount(any())).thenReturn(0L);
@@ -46,9 +48,19 @@ class CategoryServiceTest {
             // Act
             categoryService.createCategory(categoryReq("3C數位", 1), "admin");
 
-            // Assert:驗證「行為」發生了
+            // Assert:先確認有做同名檢查
             verify(categoryMapper).selectCount(any());
-            verify(categoryMapper).insert(any(Category.class));
+
+            // 攔截真正被傳進 insert 的那個 Category,斷言它的欄位值。
+            // 這樣一來,若 Service 漏掉 setName / setSortOrder / setCreatedBy / setIsDeleted,
+            // 對應欄位會是 null,下面的斷言就會變紅並印出「expected X but was null」。
+            ArgumentCaptor<Category> captor = ArgumentCaptor.forClass(Category.class);
+            verify(categoryMapper).insert(captor.capture());
+            Category saved = captor.getValue();
+            assertThat(saved.getName()).isEqualTo("3C數位");
+            assertThat(saved.getSortOrder()).isEqualTo(1);
+            assertThat(saved.getCreatedBy()).isEqualTo("admin");
+            assertThat(saved.getIsDeleted()).isEqualTo(0);
         }
 
         @Test
