@@ -43,6 +43,14 @@ public class GlobalExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
     }
 
+    // DB 約束擋下的重複(例如 categories 的 uk_name_active 在併發下相撞)。
+    // 這是應用層 selectCount 檢查漏接後的最後防線,一樣回 409 保持前後一致。
+    // 不回傳 ex.getMessage()(原始 SQL 訊息會洩漏 schema),統一給友善訊息。
+    @ExceptionHandler(org.springframework.dao.DataIntegrityViolationException.class)
+    public ProblemDetail handleDataIntegrityViolation(org.springframework.dao.DataIntegrityViolationException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "資料已存在或違反唯一性約束");
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public ProblemDetail handleIllegalState(IllegalStateException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
