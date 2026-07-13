@@ -1,6 +1,7 @@
 package com.example.orderSystem.controller;
 
 import com.example.orderSystem.dto.request.CategoryRequest;
+import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.dto.response.CategoryResponse;
 import com.example.orderSystem.entity.Category;
 import com.example.orderSystem.service.CategoryService;
@@ -12,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -39,5 +41,19 @@ public class CategoryController {
 
         // 成功回 201 Created + 乾淨的對外 DTO(不曝露 entity 內部欄位)
         return ResponseEntity.status(HttpStatus.CREATED).body(CategoryResponse.from(created));
+    }
+
+    @PatchMapping("/category/update_category")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "修改分類名稱/排序(限管理員,樂觀鎖防併發)")
+    public ResponseEntity<CategoryResponse> updateCategory(
+            @Valid @RequestBody CategoryUpdateRequest request,
+            HttpServletRequest httpRequest) {
+        String operator = (String) httpRequest.getAttribute("userId");
+
+        Category updated = categoryService.updateCategory(request, operator);
+
+        // 成功回 200 + 帶最新 version 的 DTO,前端下次修改可直接沿用
+        return ResponseEntity.ok(CategoryResponse.from(updated));
     }
 }
