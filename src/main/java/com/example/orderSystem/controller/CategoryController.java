@@ -1,8 +1,10 @@
 package com.example.orderSystem.controller;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.dto.response.CategoryResponse;
+import com.example.orderSystem.dto.response.PageResponse;
 import com.example.orderSystem.entity.Category;
 import com.example.orderSystem.service.CategoryService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -13,9 +15,11 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -55,5 +59,17 @@ public class CategoryController {
 
         // 成功回 200 + 帶最新 version 的 DTO,前端下次修改可直接沿用
         return ResponseEntity.ok(CategoryResponse.from(updated));
+    }
+
+    @GetMapping("/category/get_categories")
+    // 刻意沒有 @PreAuthorize:任何登入帳號都可查(未登入被 JwtAuthenticationFilter 擋 401)
+    @Operation(summary = "查詢分類(分頁;categoryId 或 categoryName 擇一過濾,都不帶查全部)")
+    public ResponseEntity<PageResponse<CategoryResponse>> getCategories(
+            @RequestParam(required = false) Integer categoryId,
+            @RequestParam(required = false) String categoryName,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        IPage<Category> result = categoryService.getCategories(categoryId, categoryName, page, size);
+        return ResponseEntity.ok(PageResponse.from(result, CategoryResponse::from));
     }
 }

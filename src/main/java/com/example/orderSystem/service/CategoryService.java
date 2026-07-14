@@ -1,14 +1,18 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.entity.Category;
+import com.example.orderSystem.exception.BadRequestException;
 import com.example.orderSystem.exception.ConflictException;
 import com.example.orderSystem.exception.ResourceNotFoundException;
 import com.example.orderSystem.mapper.CategoryMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 @Service
 @RequiredArgsConstructor
@@ -86,5 +90,39 @@ public class CategoryService {
 
         // 5. 重查完整最新狀態(version 已 +1、未改欄位維持原值)回給對外 DTO。
         return categoryMapper.selectById(request.getCategoryId());
+    }
+
+    // 分頁上限:防止 client 用超大 size 一次撈全表,架空分頁的意義。
+    private static final int MAX_PAGE_SIZE = 100;
+
+    /**
+     * 查詢分類(任何登入者)。categoryId / categoryName 擇一過濾,都不帶 = 查全部。
+     * name 是精確比對(前端流程是先撈清單再用 id 查,模糊查詢目前不需要)。
+     * 查無資料回空頁(200),不是 404 —— 列表端點「沒有符合的資料」是正常結果。
+     */
+    public IPage<Category> getCategories(Integer categoryId, String categoryName, int page, int size) {
+        // 空白字串視同沒帶:query string 很容易出現 ?categoryName= 這種殘留參數
+        String name = StringUtils.hasText(categoryName) ? categoryName.trim() : null;
+
+        if (categoryId != null && name != null) {
+            throw new BadRequestException("categoryId 與 categoryName 不可同時使用");
+        }
+        if (page < 1) {
+            throw new BadRequestException("page 必須大於等於 1");
+        }
+        if (size < 1 || size > MAX_PAGE_SIZE) {
+            throw new BadRequestException("size 必須介於 1 到 " + MAX_PAGE_SIZE);
+        }
+
+        // 排序必須「完全決定順序」:sortOrder 可能同值,要再用 categoryId 補穩定性,
+        // 否則翻頁時 DB 可以自由重排同值資料 → 跨頁重複/遺漏。
+        LambdaQueryWrapper<Category> query = new LambdaQueryWrapper<Category>()
+                .eq(Category::getIsDeleted, 0)
+                .eq(categoryId != null, Category::getCategoryId, categoryId)
+                .eq(name != null, Category::getName, name)
+                .orderByAsc(Category::getSortOrder)
+                .orderByAsc(Category::getCategoryId);
+
+        return categoryMapper.selectPage(new Page<>(page, size), query);
     }
 }

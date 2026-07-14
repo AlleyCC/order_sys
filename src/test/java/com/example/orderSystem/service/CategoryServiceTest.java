@@ -1,8 +1,10 @@
 package com.example.orderSystem.service;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.entity.Category;
+import com.example.orderSystem.exception.BadRequestException;
 import com.example.orderSystem.exception.ConflictException;
 import com.example.orderSystem.exception.ResourceNotFoundException;
 import com.example.orderSystem.mapper.CategoryMapper;
@@ -214,6 +216,53 @@ class CategoryServiceTest {
 
             // 衝突後不該再重查(存在性已知,直接中止)
             verify(categoryMapper, never()).selectById(any());
+        }
+    }
+
+    @Nested
+    @DisplayName("getCategories")
+    class GetCategories {
+
+        @Test
+        @DisplayName("categoryId 與 categoryName 同時帶 → 丟 BadRequest,且不查 DB")
+        void bothParamsRejected() {
+            assertThatThrownBy(() ->
+                    categoryService.getCategories(1, "飲料", 1, 10))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessage("categoryId 與 categoryName 不可同時使用");
+
+            verify(categoryMapper, never()).selectPage(any(), any());
+        }
+
+        @Test
+        @DisplayName("page < 1 → 丟 BadRequest")
+        void pageBelowOneRejected() {
+            assertThatThrownBy(() ->
+                    categoryService.getCategories(null, null, 0, 10))
+                    .isInstanceOf(BadRequestException.class);
+
+            verify(categoryMapper, never()).selectPage(any(), any());
+        }
+
+        @Test
+        @DisplayName("size 超過上限 100 → 丟 BadRequest(防止繞過分頁)")
+        void sizeOverLimitRejected() {
+            assertThatThrownBy(() ->
+                    categoryService.getCategories(null, null, 1, 101))
+                    .isInstanceOf(BadRequestException.class);
+
+            verify(categoryMapper, never()).selectPage(any(), any());
+        }
+
+        @Test
+        @DisplayName("categoryName 只有空白 → 視同未帶,不觸發互斥檢查,照常查詢")
+        void blankNameTreatedAsAbsent() {
+            when(categoryMapper.selectPage(any(), any())).thenReturn(new Page<>(1, 10));
+
+            // 有帶 categoryId + 空白 name → 不該被互斥擋下
+            categoryService.getCategories(1, "   ", 1, 10);
+
+            verify(categoryMapper).selectPage(any(), any());
         }
     }
 }
