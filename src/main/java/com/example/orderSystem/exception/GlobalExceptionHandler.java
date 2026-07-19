@@ -60,4 +60,17 @@ public class GlobalExceptionHandler {
     public ProblemDetail handleMissingParam(org.springframework.web.bind.MissingServletRequestParameterException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "必須輸入 " + ex.getParameterName());
     }
+
+    @ExceptionHandler(BadRequestException.class)
+    public ProblemDetail handleBadRequest(BadRequestException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    // query string 型別轉不過去(例如 ?categoryId=abc)。
+    // 沒接這個的話 Spring 會往上拋成 500,但這明明是 client 的錯 → 400。
+    // 不回原始訊息(會帶出 Java 型別名稱),統一給友善訊息。
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ProblemDetail handleTypeMismatch(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "參數格式錯誤: " + ex.getName());
+    }
 }

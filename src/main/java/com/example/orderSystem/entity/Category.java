@@ -3,6 +3,7 @@ package com.example.orderSystem.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.Version;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -15,6 +16,12 @@ public class Category {
     private Integer categoryId;
     private String name;
     private Integer sortOrder;
+
+    // 樂觀鎖:updateById 時 MyBatis-Plus 的 OptimisticLockerInnerInterceptor 會自動
+    // 把它挪到 WHERE(version=舊值)並在 SET 裡 +1。打中 0 列即代表有人搶先改過。
+    @Version
+    private Integer version;
+
     private Integer isDeleted;
     private String createdBy;
     private LocalDateTime createdAt;

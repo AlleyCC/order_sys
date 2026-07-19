@@ -1,7 +1,10 @@
 package com.example.orderSystem.controller;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.example.orderSystem.dto.request.CategoryRequest;
+import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.dto.response.CategoryResponse;
+import com.example.orderSystem.dto.response.PageResponse;
 import com.example.orderSystem.entity.Category;
 import com.example.orderSystem.service.CategoryService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -14,6 +17,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -37,5 +41,31 @@ public class CategoryController {
 
         // 成功回 201 Created + 乾淨的對外 DTO(不曝露 entity 內部欄位)
         return ResponseEntity.status(HttpStatus.CREATED).body(CategoryResponse.from(created));
+    }
+
+    @PatchMapping("/category/update_category")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "修改分類名稱/排序(限管理員,樂觀鎖防併發)")
+    public ResponseEntity<CategoryResponse> updateCategory(
+            @Valid @RequestBody CategoryUpdateRequest request,
+            HttpServletRequest httpRequest) {
+        String operator = (String) httpRequest.getAttribute("userId");
+
+        Category updated = categoryService.updateCategory(request, operator);
+
+        // 成功回 200 + 帶最新 version 的 DTO,前端下次修改可直接沿用
+        return ResponseEntity.ok(CategoryResponse.from(updated));
+    }
+
+    @GetMapping("/category/get_categories")
+    // 刻意沒有 @PreAuthorize:任何登入帳號都可查(未登入被 JwtAuthenticationFilter 擋 401)
+    @Operation(summary = "查詢分類(分頁;categoryId 或 categoryName 擇一過濾,都不帶查全部)")
+    public ResponseEntity<PageResponse<CategoryResponse>> getCategories(
+            @RequestParam(required = false) Integer categoryId,
+            @RequestParam(required = false) String categoryName,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        IPage<Category> result = categoryService.getCategories(categoryId, categoryName, page, size);
+        return ResponseEntity.ok(PageResponse.from(result, CategoryResponse::from));
     }
 }
