@@ -262,6 +262,115 @@ class CategoryControllerTest extends AbstractIntegrationTest {
     }
 
     @Nested
+    @DisplayName("POST /category/delete_category")
+    class DeleteCategory {
+
+        /** 刪除的小工具:只發請求不斷言,讓各測試自己接預期結果。 */
+        private org.springframework.test.web.servlet.ResultActions deleteCategory(
+                int id, int version, String token) throws Exception {
+            return mockMvc.perform(post("/category/delete_category")
+                    .header("Authorization", "Bearer " + token)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"categoryId\":" + id + ",\"version\":" + version + "}"));
+        }
+
+        @Test
+        @DisplayName("管理員成功刪除 → 200 + message,且 get_categories 再也查不到")
+        void adminDeletes() throws Exception {
+            JsonNode created = createCategory("刪除-成功", 1);
+            int id = created.get("categoryId").asInt();
+
+            deleteCategory(id, 0, adminToken)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.message").value("成功刪除一筆分類"));
+
+            // 驗證「真的刪了」:不信 API 的一面之詞,用查詢端點證明它從有效清單消失
+            mockMvc.perform(get("/category/get_categories")
+                            .param("categoryId", String.valueOf(id))
+                            .header("Authorization", "Bearer " + employeeToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.total").value(0));
+        }
+
+        @Test
+        @DisplayName("刪除後同名可重新建立 → 201(uk_name_active 的軟刪設計)")
+        void recreateSameNameAfterDelete() throws Exception {
+            JsonNode created = createCategory("刪除-重生", 1);
+            deleteCategory(created.get("categoryId").asInt(), 0, adminToken)
+                    .andExpect(status().isOk());
+
+            // helper 內建 isCreated 斷言:這裡沒炸 = 同名成功重建
+            createCategory("刪除-重生", 2);
+        }
+
+        @Test
+        @DisplayName("分類不存在 → 404")
+        void notFound() throws Exception {
+            deleteCategory(999999, 0, adminToken)
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.detail").value("分類不存在"));
+        }
+
+        @Test
+        @DisplayName("已軟刪過再刪一次 → 404(與 update 一致:不洩漏已刪資料)")
+        void deleteTwiceNotFound() throws Exception {
+            JsonNode created = createCategory("刪除-兩次", 1);
+            int id = created.get("categoryId").asInt();
+
+            deleteCategory(id, 0, adminToken).andExpect(status().isOk());
+
+            // 第一次軟刪 version 已 0→1;就算帶「正確的」新 version,已軟刪就是 404
+            deleteCategory(id, 1, adminToken).andExpect(status().isNotFound());
+        }
+
+        @Test
+        @DisplayName("version 對不上 → 409(樂觀鎖擋下)")
+        void staleVersionConflict() throws Exception {
+            // create 出來的 version 固定是 0;client 卻拿 1 來刪 → 樂觀鎖打不中
+            JsonNode created = createCategory("刪除-版本衝突", 1);
+            int id = created.get("categoryId").asInt();
+
+            deleteCategory(id, 1, adminToken)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.detail").value("分類已被其他人修改,請重新載入"));
+        }
+
+        @Test
+        @DisplayName("非管理員(employee)→ 403")
+        void nonAdminForbidden() throws Exception {
+            JsonNode created = createCategory("刪除-權限", 1);
+
+            deleteCategory(created.get("categoryId").asInt(), 0, employeeToken)
+                    .andExpect(status().isForbidden());
+        }
+
+        @Test
+        @DisplayName("無 Token → 401")
+        void noTokenUnauthorized() throws Exception {
+            mockMvc.perform(post("/category/delete_category")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"categoryId\":1,\"version\":0}"))
+                    .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("缺 categoryId 或缺 version → 400")
+        void missingFieldsRejected() throws Exception {
+            mockMvc.perform(post("/category/delete_category")
+                            .header("Authorization", "Bearer " + adminToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"version\":0}"))
+                    .andExpect(status().isBadRequest());
+
+            mockMvc.perform(post("/category/delete_category")
+                            .header("Authorization", "Bearer " + adminToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"categoryId\":1}"))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
+    @Nested
     @DisplayName("GET /category/get_categories")
     class GetCategories {
 
