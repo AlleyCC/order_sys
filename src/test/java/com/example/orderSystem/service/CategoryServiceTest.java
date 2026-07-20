@@ -1,6 +1,7 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.example.orderSystem.dto.request.CategoryDeleteRequest;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.entity.Category;
@@ -216,6 +217,69 @@ class CategoryServiceTest {
 
             // 衝突後不該再重查(存在性已知,直接中止)
             verify(categoryMapper, never()).selectById(any());
+        }
+    }
+
+    private CategoryDeleteRequest deleteReq(Integer id, Integer version) {
+        CategoryDeleteRequest r = new CategoryDeleteRequest();
+        r.setCategoryId(id);
+        r.setVersion(version);
+        return r;
+    }
+
+    @Nested
+    @DisplayName("deleteCategory")
+    class DeleteCategory {
+
+        // 註:整合測試那邊是「打 get_categories 查不到」驗證刪除生效;
+        // unit test 的 mapper 是 mock,query 只會回 stub 的值,驗不了真實狀態,
+        // 所以這裡改驗「送進 updateById 的 entity 就是一次正確的軟刪」—— 同一件事的單元級寫法。
+        @Test
+        @DisplayName("成功軟刪 → updateById 帶 id/version/isDeleted=1/updatedBy,不動 name/sortOrder")
+        void softDeletes() {
+            // Arrange:存在且有效(version=0),樂觀鎖打中 1 列
+            when(categoryMapper.selectOne(any())).thenReturn(existing(1, "3C數位", 1, 0));
+            when(categoryMapper.updateById(any(Category.class))).thenReturn(1);
+
+            // Act
+            categoryService.deleteCategory(deleteReq(1, 0), "admin");
+
+            // Assert:攔截送進 updateById 的 entity,釘死每個欄位
+            ArgumentCaptor<Category> captor = ArgumentCaptor.forClass(Category.class);
+            verify(categoryMapper).updateById(captor.capture());
+            Category sent = captor.getValue();
+            assertThat(sent.getCategoryId()).isEqualTo(1);
+            assertThat(sent.getVersion()).isEqualTo(0);      // 帶 client 的 version 給樂觀鎖比對
+            assertThat(sent.getIsDeleted()).isEqualTo(1);    // 軟刪的本體:is_deleted 0→1
+            assertThat(sent.getUpdatedBy()).isEqualTo("admin"); // 稽核欄
+            assertThat(sent.getName()).isNull();             // 刪除不准順手動到名稱/排序
+            assertThat(sent.getSortOrder()).isNull();
+        }
+
+        @Test
+        @DisplayName("分類不存在或已軟刪 → 丟 NotFound,不進 update")
+        void notFoundRejected() {
+            when(categoryMapper.selectOne(any())).thenReturn(null); // 查不到「有效」分類
+
+            assertThatThrownBy(() ->
+                    categoryService.deleteCategory(deleteReq(999, 0), "admin"))
+                    .isInstanceOf(ResourceNotFoundException.class)
+                    .hasMessage("分類不存在");
+
+            verify(categoryMapper, never()).updateById(any(Category.class));
+        }
+
+        @Test
+        @DisplayName("version 對不上(create 後 client 拿錯 version 來刪)→ 丟 Conflict")
+        void staleVersionRejected() {
+            // Arrange:DB 裡是 create 出來的 version=0;client 帶 1 → 樂觀鎖打中 0 列
+            when(categoryMapper.selectOne(any())).thenReturn(existing(1, "3C數位", 1, 0));
+            when(categoryMapper.updateById(any(Category.class))).thenReturn(0);
+
+            assertThatThrownBy(() ->
+                    categoryService.deleteCategory(deleteReq(1, 1), "admin"))
+                    .isInstanceOf(ConflictException.class)
+                    .hasMessage("分類已被其他人修改,請重新載入");
         }
     }
 

@@ -1,6 +1,7 @@
 package com.example.orderSystem.controller;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.example.orderSystem.dto.request.CategoryDeleteRequest;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.dto.response.CategoryResponse;
@@ -12,6 +13,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -59,6 +62,22 @@ public class CategoryController {
 
         // 成功回 200 + 帶最新 version 的 DTO,前端下次修改可直接沿用
         return ResponseEntity.ok(CategoryResponse.from(updated));
+    }
+
+    @PostMapping("/category/delete_category")
+    @PreAuthorize("hasRole('ADMIN')")
+    // 用 POST 而非 DELETE:body 要帶 version(樂觀鎖 token),
+    // 而 HTTP spec 對 DELETE 帶 body 語意未定義,部分 proxy/client 會丟棄。
+    @Operation(summary = "刪除分類(限管理員,軟刪除,樂觀鎖防併發)")
+    public ResponseEntity<Map<String, String>> deleteCategory(
+            @Valid @RequestBody CategoryDeleteRequest request,
+            HttpServletRequest httpRequest) {
+        String operator = (String) httpRequest.getAttribute("userId");
+
+        categoryService.deleteCategory(request, operator);
+
+        // 刪掉的資源沒有新狀態可回,回 200 + 訊息(專案慣例,同 create_order 風格)
+        return ResponseEntity.ok(Map.of("message", "成功刪除一筆分類"));
     }
 
     @GetMapping("/category/get_categories")

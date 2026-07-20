@@ -3,6 +3,7 @@ package com.example.orderSystem.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.example.orderSystem.dto.request.CategoryDeleteRequest;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
 import com.example.orderSystem.entity.Category;
@@ -90,6 +91,38 @@ public class CategoryService {
 
         // 5. 重查完整最新狀態(version 已 +1、未改欄位維持原值)回給對外 DTO。
         return categoryMapper.selectById(request.getCategoryId());
+    }
+
+    /**
+     * 刪除分類(軟刪除:is_deleted 0→1)。授權(限管理員)在 Controller 處理。
+     * 併發同樣走樂觀鎖:B 搶先改過(version +1)→ A 帶舊 version 來刪會打中 0 列 → 409,
+     * 逼 client 重新載入、看清楚現在的分類長什麼樣再決定要不要刪。
+     *
+     * 「分類下有商品不可刪」的檢查目前刻意缺席:menus 還沒有 category_id,
+     * 無從查起。等「商品掛分類」功能落地時必須回來補(見 category-followups)。
+     */
+    public void deleteCategory(CategoryDeleteRequest request, String operator) {
+        // 1. 只找「有效」分類;不存在或已軟刪 → 一律 404(與 update 一致,不洩漏已刪資料)。
+        //    先做這步,第 2 步打中 0 列時才能斷定原因只剩 version 衝突。
+        Category existing = categoryMapper.selectOne(new LambdaQueryWrapper<Category>()
+                .eq(Category::getCategoryId, request.getCategoryId())
+                .eq(Category::getIsDeleted, 0));
+        if (existing == null) {
+            throw new ResourceNotFoundException("分類不存在");
+        }
+
+        // 2. 軟刪 = 一次「只改 is_deleted」的部分更新;name/sortOrder 不帶,絕不順手動到。
+        //    active_flag 是衍生欄位會自動變 NULL → 同名分類從此可重建(uk_name_active 設計)。
+        Category update = new Category();
+        update.setCategoryId(request.getCategoryId());
+        update.setVersion(request.getVersion());
+        update.setIsDeleted(1);
+        update.setUpdatedBy(operator);
+
+        int affected = categoryMapper.updateById(update);
+        if (affected == 0) {
+            throw new ConflictException("分類已被其他人修改,請重新載入");
+        }
     }
 
     // 分頁上限:防止 client 用超大 size 一次撈全表,架空分頁的意義。
