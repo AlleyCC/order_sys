@@ -117,6 +117,14 @@ Client (REST + WebSocket)
 | `POST /order/pay_order` | Yes |
 | `GET /user/get_user_transaction_record` | Yes |
 | `WS /ws` | Yes (STOMP 連線時驗證 JWT) |
+| `POST /category/create_category` | Yes + RBAC 授權(見 2.7) |
+| `PATCH /category/update_category` | Yes + RBAC 授權(見 2.7) |
+| `POST /category/delete_category` | Yes + RBAC 授權(見 2.7) |
+| `GET /category/get_categories` | Yes |
+| `/admin/rbac/**` | Yes + 僅超級管理員(見 2.7) |
+
+> 免登入白名單集中定義於 `SecurityConstants.WHITE_LIST`;「需要認證」的端點中,
+> 只有登記於 `resources` 表的才另外受 RBAC 角色授權管制,其餘登入即可。
 
 ### 2.6 金鑰檔案
 
@@ -150,6 +158,76 @@ app.jwt.public-key=../key/public_key.pem
 app.password.private-key=../key/password_private.key
 app.password.public-key=../key/password_public.key
 ```
+
+### 2.7 RBAC 動態授權
+
+#### 2.7.1 模型
+
+一個帳號可擁有多個角色,一個角色可對應多個資源(後端 API);
+帳號的有效權限為所有角色權限之聯集。授權規則存於 DB,管理端調整後
+**即時生效**(不重啟服務、不重新登入)。
+
+```
+users ──< user_roles >── roles ──< role_resources >── resources(url_pattern + http_method)
+```
+
+- 角色:`SUPER_ADMIN`(超級管理員)、`LEADER`(團長)、`CUSTOMER_SERVICE`(客服)、`MEMBER`(一般成員)
+- **超級管理員恆具全部權限**:授權層程式碼不變量,不依賴 `role_resources`,不可經管理端移除
+- JWT access token 為**純身份憑證**(只含 `sub` + `jti`,無 role claim);
+  「能做什麼」由 `DynamicAuthorizationManager` 每次請求查詢(Redis → DB)
+
+#### 2.7.2 授權判斷順序(每次請求)
+
+```
+1. 白名單(SecurityConstants.WHITE_LIST)→ 放行
+2. 未認證(無/過期/無效 token)→ 401
+3. 使用者角色含 SUPER_ADMIN → 放行
+4. 請求未命中 resources 表任何 pattern → 放行(登入即可)
+5. 命中 → 任一角色被授權該資源 → 放行;否則 403
+```
+
+#### 2.7.3 錯誤語意(前端依此分流)
+
+| 狀態 | 回應 body | 意義 |
+|------|-----------|------|
+| 401 | `{"status":401,"detail":"未登入或憑證已失效"}` | 未登入 → 導向登入頁 |
+| 403 | `{"status":403,"detail":"權限不足"}` | 已登入但無權限 → 顯示提示 |
+
+#### 2.7.4 快取與降級
+
+| Redis key | 內容 | 失效時機 |
+|-----------|------|---------|
+| `rbac:user-roles:{userId}` | 使用者的角色名清單 | 管理端調整該使用者角色時刪除 |
+| `rbac:role-resources:{roleName}` | 角色可用資源清單 | 管理端調整該角色權限時刪除 |
+| `rbac:resources:all` | 全部已登記資源 | TTL(24h)到期 |
+
+- Cache-Aside:讀 miss 補快取;寫 DB 後**刪 key**(不更新),TTL 24h 兜底
+- **降級**:Redis 故障時直接查 DB,授權功能不中斷;
+  jti 黑名單檢查同樣 fail-open(token 仍受簽章 + 15 分鐘效期保護)
+
+#### 2.7.5 管理端 API(僅超級管理員)
+
+| Method | Path | 說明 |
+|--------|------|------|
+| GET | `/admin/rbac/get_roles` | 列出所有角色 |
+| GET | `/admin/rbac/get_resources` | 列出所有已登記資源 |
+| GET | `/admin/rbac/get_role_resources?roleName=X` | 查某角色被授權的資源 |
+| POST | `/admin/rbac/update_role_resources` | 全量替換角色的資源 `{roleName, resourceIds[]}` |
+| POST | `/admin/rbac/update_user_roles` | 全量替換使用者的角色 `{userId, roleNames[]}` |
+
+- 全量替換語意:空陣列 = 清空;含不存在的 id/name → 400 整批拒絕
+- 角色/使用者不存在 → 404;寫入成功後立即失效對應快取
+
+#### 2.7.6 資料表(V6/V7 migration)
+
+| 表 | 重點欄位 | 約束 |
+|----|---------|------|
+| `roles` | `name`(角色代碼)、`status` | `UNIQUE(name)` |
+| `resources` | `url_pattern`、`http_method`(GET/…/ALL) | `UNIQUE(url_pattern, http_method)` |
+| `user_roles` | `user_id`、`role_id` | `UNIQUE(user_id, role_id)`、FK CASCADE |
+| `role_resources` | `role_id`、`resource_id` | `UNIQUE(role_id, resource_id)`、FK CASCADE |
+
+> `users.role` 舊欄位已停用(資料已搬遷至 `user_roles`),保留至下一次 migration 移除。
 
 ---
 
