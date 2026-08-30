@@ -1,10 +1,15 @@
-package com.example.orderSystem.support;
+package com.example.orderSystem.controller;
 
+import com.example.orderSystem.util.JwtUtils;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 
@@ -14,18 +19,21 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Base64;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
 /**
- * 所有整合測試的共用基底:啟動 MySQL / Redis 容器、生成丟棄式 RSA 金鑰、
- * 把連線與金鑰路徑注入 Spring context。整合測試只要 extends 這個類別,
- * 就不用再重複這些設定,也不依賴本機的 ./key/。
+ * 情境 6:快取服務故障,授權功能降級但不中斷(spec: rbac-authorization)。
  *
- * 容器採 singleton 模式:static 啟動一次,整個 JVM 內所有整合測試共用
- * (Testcontainers 的 Ryuk 會在測試結束後自動回收),比每個 class 各起一組快得多。
+ * 刻意「不」繼承 AbstractIntegrationTest:測試中會把 Redis 容器整個停掉,
+ * 共用容器會污染同 JVM 的其他整合測試,所以這個 class 用自己的一組容器與 context。
+ * 啟動時 Redis 正常(context 內的 pub/sub 訂閱等元件正常初始化),
+ * 測試中才模擬故障。
  */
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-public abstract class AbstractIntegrationTest {
+class RbacRedisDegradationTest {
 
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0")
             .withDatabaseName("paypool")
@@ -35,7 +43,7 @@ public abstract class AbstractIntegrationTest {
     static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7-alpine")
             .withExposedPorts(6379);
 
-    protected static final Path KEY_DIR;
+    static final Path KEY_DIR;
 
     static {
         MYSQL.start();
@@ -50,20 +58,50 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        // Redis 停掉後連線要快速失敗,測試才不會等 timeout
+        registry.add("spring.data.redis.connect-timeout", () -> "500ms");
+        registry.add("spring.data.redis.timeout", () -> "500ms");
 
         String priv = KEY_DIR.resolve("private.pem").toString();
         String pub = KEY_DIR.resolve("public.pem").toString();
         registry.add("app.jwt.private-key", () -> priv);
         registry.add("app.jwt.public-key", () -> pub);
-        registry.add("app.password.private-key", () -> priv);   // 測試複用同一把即可
+        registry.add("app.password.private-key", () -> priv);
         registry.add("app.password.public-key", () -> pub);
     }
 
-    // ---- 丟棄式測試金鑰:私鑰 getEncoded()=PKCS#8、公鑰=X.509,對上 JwtUtils/PasswordUtils ----
+    @Autowired MockMvc mockMvc;
+    @Autowired JwtUtils jwtUtils;
+
+    @Test
+    @DisplayName("情境6:Redis 停止後,已登入且有權限的操作仍成功(降級直查 DB)")
+    void scenario6_redisDown_authorizedRequestStillSucceeds() throws Exception {
+        // 已登入使用者(admin=SUPER_ADMIN,正常情況必定成功的操作)
+        String token = jwtUtils.generateAccessToken("admin");
+
+        // 先確認 Redis 正常時能通(基準)
+        mockMvc.perform(get("/category/get_categories")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk());
+
+        // 快取機制故障
+        REDIS.stop();
+
+        // 操作仍然成功:黑名單檢查 fail-open、權限查詢 fallback DB
+        mockMvc.perform(get("/category/get_categories")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk());
+
+        // 未登入的請求在降級狀態下依然被正確擋下(降級 ≠ 大門敞開)
+        mockMvc.perform(get("/category/get_categories"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    // ---- 丟棄式金鑰(同 AbstractIntegrationTest 的做法) ----
 
     private static Path generateEphemeralKeys() {
         try {
-            Path dir = Files.createTempDirectory("it-keys");
+            Path dir = Files.createTempDirectory("degradation-keys");
             KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
             gen.initialize(2048);
             KeyPair kp = gen.generateKeyPair();
