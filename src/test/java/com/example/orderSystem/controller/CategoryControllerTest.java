@@ -4,6 +4,7 @@ import com.example.orderSystem.entity.Category;
 import com.example.orderSystem.mapper.CategoryMapper;
 import com.example.orderSystem.support.AbstractIntegrationTest;
 import com.example.orderSystem.util.JwtUtils;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -13,6 +14,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.HashSet;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -24,6 +31,12 @@ class CategoryControllerTest extends AbstractIntegrationTest {
 
     @Autowired
     private JwtUtils jwtUtils;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    @Autowired
+    private CategoryMapper categoryMapper;
 
     private String adminToken;
     private String employeeToken;
