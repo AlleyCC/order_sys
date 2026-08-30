@@ -53,8 +53,8 @@ public class AuthService {
             throw new AuthenticationException("帳密錯誤");
         }
 
-        // 4. Generate tokens
-        String accessToken = jwtUtils.generateAccessToken(user.getUserId(), user.getRole());
+        // 4. Generate tokens(純身份憑證,角色由授權層每次請求查)
+        String accessToken = jwtUtils.generateAccessToken(user.getUserId());
         String refreshTokenId = UUID.randomUUID().toString();
 
         // 5. Save refresh token to Redis
@@ -78,7 +78,7 @@ public class AuthService {
         }
 
         // 3. Generate new access token
-        String accessToken = jwtUtils.generateAccessToken(user.getUserId(), user.getRole());
+        String accessToken = jwtUtils.generateAccessToken(user.getUserId());
 
         return new RefreshResponse(accessToken, accessTokenExpiresIn);
     }

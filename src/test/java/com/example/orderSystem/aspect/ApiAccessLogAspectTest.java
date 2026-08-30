@@ -66,7 +66,7 @@ class ApiAccessLogAspectTest {
 
     @BeforeEach
     void setUp() {
-        aliceToken = jwtUtils.generateAccessToken("alice", "employee");
+        aliceToken = jwtUtils.generateAccessToken("alice");
     }
 
     @Nested

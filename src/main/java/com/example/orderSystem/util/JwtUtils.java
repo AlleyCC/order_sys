@@ -38,14 +38,18 @@ public class JwtUtils {
         publicKey = loadPublicKey(publicKeyPath);
     }
 
-    public String generateAccessToken(String userId, String role) {
+    /**
+     * Access token 是純身份憑證:只放 sub(userId)+ jti,不放角色/權限。
+     * 授權狀態每次請求由 DynamicAuthorizationManager 查詢,避免雙真相來源
+     * (token 說是團長、DB 說不是)與 token 存活期內的權限延遲。
+     */
+    public String generateAccessToken(String userId) {
         Date now = new Date();
         Date expiry = new Date(now.getTime() + accessExpiresSeconds * 1000);
 
         return Jwts.builder()
                 .id(UUID.randomUUID().toString())
                 .subject(userId)
-                .claim("role", role)
                 .issuedAt(now)
                 .expiration(expiry)
                 .signWith(privateKey)

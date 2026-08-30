@@ -22,7 +22,7 @@ public class CategoryService {
     private final CategoryMapper categoryMapper;
 
     /**
-     * 新增分類。授權(限管理員)在 Controller 用 @PreAuthorize 處理,
+     * 新增分類。授權由動態授權層(resources 表登記)在進入 Controller 前處理,
      * 這裡只負責業務邏輯。operator 為操作者帳號,寫入稽核欄位。
      */
     public Category createCategory(CategoryRequest request, String operator) {

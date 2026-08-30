@@ -84,7 +84,7 @@ class AuthServiceTest {
             User user = createUser("alice", "test1234");
             when(passwordUtils.decryptPassword("encrypted")).thenReturn("test1234");
             when(userMapper.selectById("alice")).thenReturn(user);
-            when(jwtUtils.generateAccessToken("alice", "employee")).thenReturn("jwt-token");
+            when(jwtUtils.generateAccessToken("alice")).thenReturn("jwt-token");
 
             LoginResponse resp = authService.login(loginRequest("alice"), "encrypted");
 
@@ -140,7 +140,7 @@ class AuthServiceTest {
             User user = createUser("alice", "pw");
             when(tokenRedisService.getRefreshTokenUserId("rt-001")).thenReturn("alice");
             when(userMapper.selectById("alice")).thenReturn(user);
-            when(jwtUtils.generateAccessToken("alice", "employee")).thenReturn("new-jwt");
+            when(jwtUtils.generateAccessToken("alice")).thenReturn("new-jwt");
 
             RefreshResponse resp = authService.refresh(refreshRequest("rt-001"));
 

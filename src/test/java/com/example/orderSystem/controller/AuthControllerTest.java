@@ -269,7 +269,7 @@ class AuthControllerTest {
         @Test
         @DisplayName("有效 Token 存取受保護 API → 不是 401")
         void validToken() throws Exception {
-            String token = jwtUtils.generateAccessToken("alice", "employee");
+            String token = jwtUtils.generateAccessToken("alice");
 
             mockMvc.perform(get("/user/get_user_transaction_record")
                             .header("Authorization", "Bearer " + token))

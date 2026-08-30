@@ -11,7 +11,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -44,10 +43,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 }
 
                 String userId = claims.getSubject();
-                String role = claims.get("role", String.class);
 
-                var authorities = List.of(new SimpleGrantedAuthority("ROLE_" + role.toUpperCase()));
-                var auth = new UsernamePasswordAuthenticationToken(userId, null, authorities);
+                // Token 是純身份憑證:只證明「你是誰」。authorities 刻意留空——
+                // 「你能做什麼」由 DynamicAuthorizationManager 每次請求查(Redis→DB),
+                // 權限調整才能即時生效,不受 token 15 分鐘存活期影響。
+                var auth = new UsernamePasswordAuthenticationToken(userId, null, List.of());
                 SecurityContextHolder.getContext().setAuthentication(auth);
             } catch (ExpiredJwtException e) {
                 // Token expired — don't set authentication, let Spring Security handle 401

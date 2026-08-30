@@ -35,9 +35,9 @@ class OrderControllerTest extends AbstractIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        aliceToken = jwtUtils.generateAccessToken("alice", "employee");
-        bobToken = jwtUtils.generateAccessToken("bob", "employee");
-        adminToken = jwtUtils.generateAccessToken("admin", "admin");
+        aliceToken = jwtUtils.generateAccessToken("alice");
+        bobToken = jwtUtils.generateAccessToken("bob");
+        adminToken = jwtUtils.generateAccessToken("admin");
     }
 
     // ========== GET /order/get_all_shops ==========

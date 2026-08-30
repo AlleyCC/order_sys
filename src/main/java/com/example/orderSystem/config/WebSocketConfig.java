@@ -15,7 +15,6 @@ import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.MessageHeaderAccessor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
 import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
@@ -60,9 +59,9 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                             throw new MessageDeliveryException("Token 已被登出");
                         }
                         String userId = claims.getSubject();
-                        String role = claims.get("role", String.class);
-                        var authorities = List.of(new SimpleGrantedAuthority("ROLE_" + role.toUpperCase()));
-                        var auth = new UsernamePasswordAuthenticationToken(userId, null, authorities);
+                        // Token 已是純身份憑證(無 role claim);WS 這裡只需要身份
+                        // 做 user destination 路由,不做角色授權,authorities 留空。
+                        var auth = new UsernamePasswordAuthenticationToken(userId, null, List.of());
                         accessor.setUser(auth);
                     } catch (MessageDeliveryException e) {
                         throw e;

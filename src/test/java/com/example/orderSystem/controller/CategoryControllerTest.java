@@ -43,8 +43,8 @@ class CategoryControllerTest extends AbstractIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        adminToken = jwtUtils.generateAccessToken("admin", "admin");
-        employeeToken = jwtUtils.generateAccessToken("alice", "employee");
+        adminToken = jwtUtils.generateAccessToken("admin");
+        employeeToken = jwtUtils.generateAccessToken("alice");
     }
 
     /** 用 create API 建一筆分類,回傳它的 JSON(含 categoryId、version),給 update 測試當前置資料。 */

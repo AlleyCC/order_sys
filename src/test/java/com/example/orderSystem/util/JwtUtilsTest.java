@@ -45,7 +45,7 @@ class JwtUtilsTest {
     @Test
     @DisplayName("generateAccessToken 產出的 JWT 包含 jti claim")
     void tokenContainsJti() {
-        String token = jwtUtils.generateAccessToken("alice", "employee");
+        String token = jwtUtils.generateAccessToken("alice");
         Claims claims = jwtUtils.parseToken(token);
 
         assertThat(claims.getId()).isNotNull().isNotEmpty();
@@ -54,8 +54,8 @@ class JwtUtilsTest {
     @Test
     @DisplayName("每次產出的 jti 都不同")
     void jtiIsUnique() {
-        String token1 = jwtUtils.generateAccessToken("alice", "employee");
-        String token2 = jwtUtils.generateAccessToken("alice", "employee");
+        String token1 = jwtUtils.generateAccessToken("alice");
+        String token2 = jwtUtils.generateAccessToken("alice");
 
         String jti1 = jwtUtils.parseToken(token1).getId();
         String jti2 = jwtUtils.parseToken(token2).getId();
@@ -66,7 +66,7 @@ class JwtUtilsTest {
     @Test
     @DisplayName("extractJti 回傳正確的 jti")
     void extractJti() {
-        String token = jwtUtils.generateAccessToken("bob", "admin");
+        String token = jwtUtils.generateAccessToken("bob");
         Claims claims = jwtUtils.parseToken(token);
 
         assertThat(jwtUtils.extractJti(token)).isEqualTo(claims.getId());
@@ -75,7 +75,7 @@ class JwtUtilsTest {
     @Test
     @DisplayName("getRemainingSeconds 回傳正數")
     void remainingSeconds() {
-        String token = jwtUtils.generateAccessToken("alice", "employee");
+        String token = jwtUtils.generateAccessToken("alice");
         Claims claims = jwtUtils.parseToken(token);
 
         long remaining = jwtUtils.getRemainingSeconds(claims);
