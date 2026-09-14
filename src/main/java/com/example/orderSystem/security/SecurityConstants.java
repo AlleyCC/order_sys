@@ -8,6 +8,7 @@ public final class SecurityConstants {
 
     public static final String[] WHITE_LIST = {
             "/login/create_token",
+            "/login/logout",
             "/auth/refresh",
             "/order/get_all_shops",
             "/ws/**",

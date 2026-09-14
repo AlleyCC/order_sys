@@ -3,6 +3,8 @@ package com.example.orderSystem.controller;
 import com.example.orderSystem.dto.response.LoginResponse;
 import com.example.orderSystem.util.JwtUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.jsonwebtoken.Jwts;
+import org.assertj.core.api.SoftAssertions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -13,6 +15,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.testcontainers.containers.GenericContainer;
@@ -24,9 +27,12 @@ import javax.crypto.Cipher;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyFactory;
+import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
+import java.util.Date;
+import java.util.UUID;
 
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -250,6 +256,40 @@ class AuthControllerTest {
             mockMvc.perform(get("/user/get_user_transaction_record")
                             .header("Authorization", "Bearer " + login.getAccessToken()))
                     .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("access token 已過期時登出 → 仍應 200, 且 refresh token 被撤銷")
+        void logoutWithExpiredAccessToken_revokesRefreshToken() throws Exception {
+            LoginResponse login = doLogin();
+
+            // 用同一把私鑰簽一顆一分鐘前過期的 token:被拒的原因只會是過期,不是簽章
+            PrivateKey privateKey = (PrivateKey) ReflectionTestUtils.getField(jwtUtils, "privateKey");
+            Date expiredAt = new Date(System.currentTimeMillis() - 60_000);
+            String expiredAccessToken = Jwts.builder()
+                    .id(UUID.randomUUID().toString())
+                    .subject("alice")
+                    .issuedAt(new Date(expiredAt.getTime() - 900_000))
+                    .expiration(expiredAt)
+                    .signWith(privateKey)
+                    .compact();
+
+            int logoutStatus = mockMvc.perform(post("/login/logout")
+                            .header("Authorization", "Bearer " + expiredAccessToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"refreshToken\":\"" + login.getRefreshToken() + "\"}"))
+                    .andReturn().getResponse().getStatus();
+
+            int refreshStatus = mockMvc.perform(post("/auth/refresh")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"refreshToken\":\"" + login.getRefreshToken() + "\"}"))
+                    .andReturn().getResponse().getStatus();
+
+            // 兩個結果一起看:登出有沒有被擋、refresh token 有沒有真的被撤銷
+            SoftAssertions softly = new SoftAssertions();
+            softly.assertThat(logoutStatus).as("帶過期 access token 登出").isEqualTo(200);
+            softly.assertThat(refreshStatus).as("登出後以同一顆 refresh token 換發").isEqualTo(401);
+            softly.assertAll();
         }
     }
 
