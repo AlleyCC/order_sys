@@ -64,7 +64,7 @@ Client (REST + WebSocket)
    a. RSA 私鑰解密密碼
    b. BCrypt 比對資料庫儲存的雜湊值
    c. 查詢使用者角色 (user_role)
-   d. 簽發 Access Token (JWT RS256, 15min) + Refresh Token (UUID, 7d 存入 DB)
+   d. 簽發 Access Token (JWT RS256, 15min) + Refresh Token (UUID, 7d 存入 Redis)
 4. 回傳: { "accessToken": "<JWT>", "refreshToken": "<UUID>", "expiresIn": 900 }
 ```
 
@@ -76,7 +76,7 @@ Client (REST + WebSocket)
   2. JWT 簽章是否有效 (RS256 公鑰驗證)
   3. Token 是否過期
 - 驗證通過後，將 `userId` (JWT subject) 存入 `request.setAttribute("userId", ...)`
-- Access Token 為短命 token (15 分鐘)，驗證時不查 DB（純 stateless JWT 驗簽）
+- Access Token 為短命 token (15 分鐘)，驗證時不查 DB：驗簽後只查 Redis 黑名單（登出撤銷），因此不是純 stateless
 
 ### 2.3 Token 架構 (Access + Refresh)
 
@@ -90,14 +90,14 @@ Client (REST + WebSocket)
 **Refresh 流程：**
 1. Access Token 過期 → API 回傳 401
 2. 前端用 Refresh Token 呼叫 `POST /auth/refresh`
-3. Server 查 DB 確認 Refresh Token 有效且未 revoke
+3. Server 查 Redis（`refresh:{tokenId}`）確認 Refresh Token 仍存在（登出時會被刪除）
 4. 簽發新 Access Token，使用者無感
 
 ### 2.4 登出機制
 
-- `POST /login/logout` 將當前 Refresh Token 標記為 revoked（`refresh_tokens.revoked = 1`）
-- 舊 Access Token 最多 15 分鐘後自然過期
-- Refresh Token 被 revoke 後，無法再換發新 Access Token
+- `POST /login/logout` 將當前 Access Token 的 `jti` 加入 Redis 黑名單（TTL = 該 token 剩餘效期），並刪除 Redis 中的 Refresh Token（`refresh:{tokenId}`）
+- 被拉黑的 Access Token 立即失效，不必等 15 分鐘自然過期（Redis 故障時黑名單檢查 fail-open，見 `TokenAuthenticator`）
+- Refresh Token 刪除後，無法再換發新 Access Token
 
 ### 2.5 受保護的 API 路徑
 
@@ -684,8 +684,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 ```
 users (1) ──┬──< orders (N)          [created_by → user_id]
             ├──< order_items (N)     [user_id → user_id]
-            ├──< transactions (N)    [user_id → user_id]
-            └──< refresh_tokens (N)  [user_id → user_id, CASCADE]
+            └──< transactions (N)    [user_id → user_id]
 
 stores (1) ──┬──< orders (N)         [store_id → store_id]
              └──< menus (N)          [store_id → store_id]
@@ -784,18 +783,6 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 
 索引: `(user_id, created_at DESC)` 複合索引，加速交易紀錄查詢。
 
-#### refresh_tokens - Refresh Token
-
-| 欄位 | 型別 | PK | NOT NULL | 說明 |
-|------|------|----|----------|------|
-| token_id | VARCHAR(36) | Y | Y | UUID |
-| user_id | VARCHAR(20) | | Y | FK → users (CASCADE) |
-| revoked | TINYINT(1) | | Y | 0=有效, 1=已撤銷 (DEFAULT 0) |
-| expire_time | DATETIME | | Y | 過期時間 (7 天) |
-| created_at | DATETIME | | Y | 建立時間 |
-
-索引: `idx_user_id (user_id)`、`idx_expire_time (expire_time)`
-
 ---
 
 ## 5. 列舉定義
@@ -870,16 +857,14 @@ src/main/java/com/example/orderSystem/
 │   ├── MenuMapper.java                  # extends BaseMapper<Menu>
 │   ├── OrderMapper.java                 # extends BaseMapper<Order> + 自訂 XML
 │   ├── OrderItemMapper.java             # extends BaseMapper<OrderItem> + 自訂 XML
-│   ├── TransactionMapper.java           # extends BaseMapper<Transaction>
-│   └── RefreshTokenMapper.java          # extends BaseMapper<RefreshToken>
+│   └── TransactionMapper.java           # extends BaseMapper<Transaction>
 ├── entity/
 │   ├── User.java
 │   ├── Store.java
 │   ├── Menu.java
 │   ├── Order.java
 │   ├── OrderItem.java
-│   ├── Transaction.java
-│   └── RefreshToken.java
+│   └── Transaction.java
 ├── dto/
 │   ├── request/                         # 請求 DTO (@Valid)
 │   │   ├── LoginRequest.java
@@ -1116,8 +1101,8 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 | 正確帳號密碼登入 | 回傳 accessToken + refreshToken |
 | 密碼錯誤 | 401，detail: "密碼錯誤" |
 | 帳號不存在 | 401，detail: "密碼錯誤"（不揭露帳號是否存在） |
-| 登出 | 200，Refresh Token 標記為 revoked |
-| 使用已 revoke 的 Refresh Token 換發 | 401 |
+| 登出 | 200，Access Token 列入黑名單、Refresh Token 自 Redis 刪除 |
+| 使用已登出的 Refresh Token 換發 | 401 |
 | 登出後舊 Access Token 在 15 分鐘內仍可使用 | 200（空窗期，設計如此） |
 | Token 過期 | 401，detail: "Token Expired" |
 | Authorization Header 缺失 | 401 |

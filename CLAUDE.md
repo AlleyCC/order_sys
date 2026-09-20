@@ -80,5 +80,5 @@ docker compose down -v && docker compose up -d
 
 - DB enums stored as VARCHAR (e.g., OrderStatus: OPEN, CLOSED, SETTLED, CANCELLED, FAILED)
 - Balance operations use CAS pattern: `UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?`
-- JWT: Access Token (15min, stateless) + Refresh Token (7d, DB-backed)
+- JWT: Access Token (15min) carries identity only (`sub` + `jti`), never roles — authorization is looked up per request by `DynamicAuthorizationManager`. Refresh Token (7d) lives in Redis (`refresh:{tokenId}`). Logout = put the access token's `jti` on the Redis blacklist (TTL = its remaining lifetime) + delete the refresh token
 - All monetary amounts are integers (not decimal)
