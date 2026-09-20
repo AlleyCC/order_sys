@@ -11,4 +11,8 @@
           AND balance >= #{amount}
     </update>
 
+    <select id="selectForUpdate" resultType="com.example.orderSystem.entity.User">
+        SELECT * FROM users WHERE user_id = #{userId} FOR UPDATE
+    </select>
+
 </mapper>

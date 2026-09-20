@@ -9,12 +9,16 @@ import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
 import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
+import com.example.orderSystem.event.BalanceChangedEvent;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
 import com.example.orderSystem.scheduler.RedisSettlementQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -36,6 +40,7 @@ public class OrderService {
     private final RedisSettlementQueue settlementQueue;
     private final PaymentService paymentService;
     private final NotificationService notificationService;
+    private final ApplicationEventPublisher eventPublisher;
 
     public List<Store> getAllShops() {
         return storeMapper.selectList(null);
@@ -91,6 +96,15 @@ public class OrderService {
         return Map.of("orderId", order.getOrderId(), "storeId", order.getStoreId());
     }
 
+    /**
+     * 隔離等級刻意降到 READ_COMMITTED。
+     * MySQL 預設是 REPEATABLE READ:交易內第一個「一般 SELECT」就決定了快照,
+     * 之後所有一般 SELECT 都讀那個快照。本方法在鎖之前已經 select 過 order/menu,
+     * 快照因此早就固定 —— 就算 selectForUpdate 拿到了鎖(它是當前讀、看得到最新),
+     * 後面 getFrozenAmount 這個一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項,
+     * 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交,鎖才真的有效。
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void createUserOrder(CreateOrderItemRequest request, String userId) {
         // 1. Validate order
         Order order = orderMapper.selectById(request.getOrderId());
@@ -113,10 +127,16 @@ public class OrderService {
             throw new IllegalStateException("該品項已下架");
         }
 
-        // 3. Check available balance
+        // 3. Check available balance —— 必須鎖住後才讀,否則是 check-then-act:
+        //    兩個併發請求會讀到同一份可用餘額而雙雙放行,凍結因此超過實際餘額。
+        //    凍結是 order_items 上的 SUM、沒有實體可鎖,所以改鎖 users 這一行:
+        //    鎖的對象不必是要保護的資料,只要是所有寫入者都必經的同一個點。
         int orderAmount = menu.getUnitPrice() * request.getQuantity();
-        Map<String, Object> account = getUserAccount(userId);
-        long available = (long) account.get("availableBalance");
+        User user = userMapper.selectForUpdate(userId);
+        if (user == null) {
+            throw new ResourceNotFoundException("使用者不存在");
+        }
+        long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
         if (available < orderAmount) {
             throw new InsufficientBalanceException("餘額不足");
         }
@@ -131,11 +151,10 @@ public class OrderService {
         item.setQuantity(request.getQuantity());
         orderItemMapper.insert(item);
 
-        // Notify balance update
-        Map<String, Object> updatedAccount = getUserAccount(userId);
-        long updatedAvailable = (long) updatedAccount.get("availableBalance");
-        notificationService.sendBalanceUpdate(userId, updatedAvailable,
-                "下單：" + menu.getProductName() + " x" + request.getQuantity());
+        // 通知延到交易 commit 之後才送(見 BalanceChangeNotifier):
+        // 交易若回滾,使用者不該收到「下單成功」;也讓上面那把行鎖不必等推播。
+        eventPublisher.publishEvent(new BalanceChangedEvent(userId,
+                "下單：" + menu.getProductName() + " x" + request.getQuantity()));
     }
 
     public void deleteUserOrder(DeleteOrderItemRequest request, String userId, String role) {

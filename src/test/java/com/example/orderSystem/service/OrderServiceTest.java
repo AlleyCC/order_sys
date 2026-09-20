@@ -18,6 +18,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -52,6 +53,8 @@ class OrderServiceTest {
     private PaymentService paymentService;
     @Mock
     private NotificationService notificationService;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     // ========== helpers ==========
 
@@ -155,7 +158,7 @@ class OrderServiceTest {
 
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(menuMapper.selectById(1)).thenReturn(menu);
-            when(userMapper.selectById("alice")).thenReturn(user);
+            when(userMapper.selectForUpdate("alice")).thenReturn(user);
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
             when(orderItemMapper.insert((OrderItem) any())).thenReturn(1);
 
@@ -194,7 +197,7 @@ class OrderServiceTest {
 
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(menuMapper.selectById(1)).thenReturn(menu);
-            when(userMapper.selectById("alice")).thenReturn(user);
+            when(userMapper.selectForUpdate("alice")).thenReturn(user);
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
