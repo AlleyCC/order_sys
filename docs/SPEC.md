@@ -526,11 +526,12 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 1. 確認訂單存在且狀態為 OPEN
 2. 確認訂單未過截止時間 (`deadline`)，已過期則拒絕
 3. 查詢 `menus` 取得 `product_name` 和 `unit_price`，驗證品項存在且供應中
-4. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN 及 FAILED 訂單的未結金額
-5. 餘額不足則拒絕
-6. 寫入 `order_items`（含品名與單價快照）
-7. 同一使用者可重複點相同品項（例如多訂幾份）
-8. 透過 WebSocket 推送當事人的可用餘額更新
+4. 以 `SELECT ... FOR UPDATE` 鎖住該使用者的 `users` 那一行，序列化同一使用者的併發下單（見 7.2「併發下單的凍結不變式」）
+5. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN 及 FAILED 訂單的未結金額（必須在取得鎖之後才讀）
+6. 餘額不足則拒絕
+7. 寫入 `order_items`（含品名與單價快照）
+8. 同一使用者可重複點相同品項（例如多訂幾份）
+9. 交易 commit 後，透過 WebSocket 推送當事人的可用餘額更新
 
 ---
 
@@ -1002,6 +1003,29 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 }
 ```
 
+#### 併發下單的凍結不變式
+
+**不變式：任一時刻，同一使用者的凍結總額不得超過其實際餘額**（即 `available_balance >= 0`）。
+
+**為什麼單純檢查會破：** 「算可用餘額」與「寫入 `order_items`」之間若沒有序列化，就是 check-then-act。兩個併發請求會讀到同一份可用餘額而雙雙放行 —— 餘額 100、兩筆各 70 同時進入，結果凍結 140、`available_balance` 變 -40。此時結算仍會被 CAS 擋下（訂單轉 FAILED、實際餘額不會被超扣），但凍結不變式已經破了，使用者會看到負的可用餘額。
+
+**作法：以 `users` 行鎖序列化**
+
+```sql
+SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
+```
+
+- 凍結金額是 `order_items` 上的 SUM，沒有單一實體可以鎖；因此改鎖 `users` 那一行 —— 鎖的對象不必是要保護的資料，只要是所有寫入者都必經的同一個點即可。
+- 鎖必須在**讀可用餘額之前**取得，並持有到交易 commit 才釋放。同一使用者的下單因此排隊，不同使用者之間互不阻塞。
+
+**隔離等級必須降到 READ_COMMITTED**
+
+`createUserOrder` 標註 `@Transactional(isolation = Isolation.READ_COMMITTED)`。MySQL 預設的 REPEATABLE READ 下，交易內第一個「一般 SELECT」（此處是查訂單的 `selectById`）就固定了快照；`SELECT ... FOR UPDATE` 雖是當前讀、拿得到鎖，但後續計算凍結金額的一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項 —— 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交資料，鎖才真的生效。
+
+**餘額通知延到 commit 之後才送**
+
+下單成功的 WebSocket 推送改為發佈 `BalanceChangedEvent`，由 `BalanceChangeNotifier` 以 `@TransactionalEventListener(AFTER_COMMIT)` 送出。兩個理由：交易若回滾，使用者不該收到「下單成功」；推播也不該被算進持鎖時間。
+
 ### 7.3 自動結算流程 (DelayQueue + @Transactional)
 
 ```
@@ -1134,6 +1158,9 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 | 餘額不足 | 400，detail: "餘額不足" |
 | 同一使用者重複點相同品項 | 201，新增一筆 order_items（允許） |
 | quantity <= 0 | 400 |
+| 餘額只夠一筆：併發下兩筆同一張單 | 只有一筆成功，凍結不超過餘額 |
+| 餘額夠兩筆：併發下兩筆 | 兩筆都成功（鎖不得誤殺） |
+| 同一人同時在兩張不同的團下單 | 凍結不變式仍成立 |
 
 #### delete_user_order
 
