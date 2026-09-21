@@ -21,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -310,11 +311,15 @@ class OrderServiceTest {
         void ownerCancelsOpen() {
             Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderMapper.updateById((Order) any())).thenReturn(1);
+            List<OrderStatus> persistedStatuses = new ArrayList<>();
+            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
+                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
+                return 1;
+            });
 
             orderService.cancelOrder("ord-001", "alice", "employee");
 
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+            assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
         }
 
         @Test
@@ -322,11 +327,15 @@ class OrderServiceTest {
         void ownerCancelsClosed() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderMapper.updateById((Order) any())).thenReturn(1);
+            List<OrderStatus> persistedStatuses = new ArrayList<>();
+            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
+                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
+                return 1;
+            });
 
             orderService.cancelOrder("ord-001", "alice", "employee");
 
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+            assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
         }
 
         @Test
@@ -374,11 +383,15 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             doThrow(new InsufficientBalanceException("alice 餘額不足"))
                     .when(paymentService).executePayment(order);
-            lenient().when(orderMapper.updateById((Order) any())).thenReturn(1);
+            List<OrderStatus> persistedStatuses = new ArrayList<>();
+            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
+                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
+                return 1;
+            });
 
             assertThatThrownBy(() -> orderService.payOrder("ord-001"))
                     .isInstanceOf(InsufficientBalanceException.class);
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.FAILED);
+            assertThat(persistedStatuses).containsExactly(OrderStatus.FAILED);
         }
 
         @Test
