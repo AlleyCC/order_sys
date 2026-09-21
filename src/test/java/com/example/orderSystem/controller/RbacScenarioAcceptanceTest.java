@@ -33,8 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 情境 6(Redis 故障降級)在 RbacRedisDegradationTest——它要停 Redis 容器,
  * 不能用這裡的共用容器。
  *
- * 種子前提:admin=SUPER_ADMIN、alice/bob=MEMBER、category 三資源未掛任何角色。
- * 測試會改 LEADER 授權與 bob 的角色,結束時還原,避免污染同 JVM 的其他測試。
+ * 種子前提:admin=SUPER_ADMIN、alice/bob 零角色、category 三資源掛在 ADMIN_STAFF。
  */
 class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
 
@@ -48,11 +47,16 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
         return jwtUtils.generateAccessToken("admin");
     }
 
-    /** 還原:LEADER 清空授權、bob 退回純 MEMBER */
     @AfterEach
     void restoreRbacState() throws Exception {
-        updateRoleResources("LEADER", "");
-        updateUserRoles("bob", "\"MEMBER\"");
+        updateRoleResources("ADMIN_STAFF", seededCategoryResourceIds());
+        updateUserRoles("bob", "");
+    }
+
+    private String seededCategoryResourceIds() {
+        return resourceIdOf("/category/create_category")
+                + "," + resourceIdOf("/category/update_category")
+                + "," + resourceIdOf("/category/delete_category");
     }
 
     // ---- helpers ----
@@ -119,10 +123,10 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
     // ---- 情境 2 + 3:有權限成功 / 無權限 403 且無資料異動 ----
 
     @Test
-    @DisplayName("情境2:LEADER 被授權建立分類 → 操作成功")
+    @DisplayName("情境2:ADMIN_STAFF 被授權建立分類 → 操作成功")
     void scenario2_grantedOperationSucceeds() throws Exception {
-        updateUserRoles("bob", "\"MEMBER\",\"LEADER\"");
-        updateRoleResources("LEADER", resourceIdOf("/category/create_category").toString());
+        updateUserRoles("bob", "\"ADMIN_STAFF\"");
+        updateRoleResources("ADMIN_STAFF", resourceIdOf("/category/create_category").toString());
 
         mockMvc.perform(post("/category/create_category")
                         .header("Authorization", "Bearer " + jwtUtils.generateAccessToken("bob"))
@@ -132,7 +136,7 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
     }
 
     @Test
-    @DisplayName("情境3:MEMBER 未被授權 → 403「權限不足」(非 401),且無資料異動")
+    @DisplayName("情境3:零角色使用者未被授權 → 403「權限不足」(非 401),且無資料異動")
     void scenario3_deniedOperationIs403AndNoMutation() throws Exception {
         long before = categoryCount();
 
@@ -177,19 +181,20 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("情境5:調整角色權限與使用者角色後,同一顆 token 下一個請求即套用")
     void scenario5_permissionChangesTakeEffectImmediately() throws Exception {
-        updateUserRoles("bob", "\"MEMBER\",\"LEADER\"");
+        updateUserRoles("bob", "\"ADMIN_STAFF\"");
+        updateRoleResources("ADMIN_STAFF", "");
         String bobToken = jwtUtils.generateAccessToken("bob");   // 全程用同一顆 token
         String createCategoryId = resourceIdOf("/category/create_category").toString();
 
-        // (a) LEADER 尚未被授權 → 403
+        // (a) ADMIN_STAFF 尚未被授權 → 403
         mockMvc.perform(post("/category/create_category")
                         .header("Authorization", "Bearer " + bobToken)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"RBAC情境5a\",\"sortOrder\":93}"))
                 .andExpect(status().isForbidden());
 
-        // (b) 管理員把「建立分類」加進 LEADER → 同一顆 token 立即可用
-        updateRoleResources("LEADER", createCategoryId);
+        // (b) 管理員把「建立分類」加進 ADMIN_STAFF → 同一顆 token 立即可用
+        updateRoleResources("ADMIN_STAFF", createCategoryId);
         mockMvc.perform(post("/category/create_category")
                         .header("Authorization", "Bearer " + bobToken)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -197,21 +202,41 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
                 .andExpect(status().isCreated());
 
         // (c) 管理員移除授權 → 同一顆 token 立即被擋
-        updateRoleResources("LEADER", "");
+        updateRoleResources("ADMIN_STAFF", "");
         mockMvc.perform(post("/category/create_category")
                         .header("Authorization", "Bearer " + bobToken)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"RBAC情境5c\",\"sortOrder\":95}"))
                 .andExpect(status().isForbidden());
 
-        // (d) 重新授權 LEADER,但把 bob 的 LEADER 角色拔掉 → 立即失效
-        updateRoleResources("LEADER", createCategoryId);
-        updateUserRoles("bob", "\"MEMBER\"");
+        // (d) 重新授權 ADMIN_STAFF,但把 bob 的角色拔光 → 立即失效
+        updateRoleResources("ADMIN_STAFF", createCategoryId);
+        updateUserRoles("bob", "");
         mockMvc.perform(post("/category/create_category")
                         .header("Authorization", "Bearer " + bobToken)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"RBAC情境5d\",\"sortOrder\":96}"))
                 .andExpect(status().isForbidden());
+    }
+
+    // ---- 零角色:一般使用者的常態 ----
+
+    @Test
+    @DisplayName("零角色使用者:未登記端點放行,已登記端點 403")
+    void zeroRoleUserPassesUnmanagedAndIsDeniedOnManaged() throws Exception {
+        updateUserRoles("bob", "");
+        String bobToken = jwtUtils.generateAccessToken("bob");
+
+        mockMvc.perform(get("/category/get_categories")
+                        .header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/category/create_category")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"RBAC情境零角色\",\"sortOrder\":97}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail").value("權限不足"));
     }
 
     // ---- 收尾清理:刪除本測試建立的分類,避免污染其他測試的查詢 ----

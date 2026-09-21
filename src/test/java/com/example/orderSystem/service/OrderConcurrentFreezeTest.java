@@ -119,7 +119,6 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
         user.setUserId("race-" + UUID.randomUUID().toString().substring(0, 8));
         user.setUserName("Race Tester");
         user.setPassword("$2a$10$XPMeuJdtYd.vXoarK3BdxOpBip8zRR5Ql3/cORtUn/N9G1pfnIAQW");
-        user.setRole("employee");
         user.setBalance(balance);
         userMapper.insert(user);
         return user.getUserId();

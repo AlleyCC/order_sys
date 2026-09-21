@@ -12,6 +12,8 @@ import java.util.Map;
 @Mapper
 public interface OrderMapper extends BaseMapper<Order> {
 
+    IPage<Map<String, Object>> getOpenOrdersWithStore(IPage<Map<String, Object>> page);
+
     IPage<Map<String, Object>> getAllOrdersWithStore(IPage<Map<String, Object>> page);
 
     OrderDetailResponse getOrderDetail(@Param("orderId") String orderId);

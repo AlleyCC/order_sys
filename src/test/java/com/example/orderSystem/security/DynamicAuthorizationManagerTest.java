@@ -92,7 +92,7 @@ class DynamicAuthorizationManagerTest {
     @Test
     @DisplayName("未登記端點:登入即可放行(維持既有行為)")
     void unregisteredEndpoint_grantedForAuthenticated() {
-        when(cacheService.getUserRoles("alice")).thenReturn(List.of("MEMBER"));
+        when(cacheService.getUserRoles("alice")).thenReturn(List.of("ACCOUNTANT"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/category/create_category", "POST")));
 
@@ -102,7 +102,7 @@ class DynamicAuthorizationManagerTest {
     @Test
     @DisplayName("同 URL 但 method 未登記:視為未管制,放行")
     void registeredUrlButDifferentMethod_granted() {
-        when(cacheService.getUserRoles("alice")).thenReturn(List.of("MEMBER"));
+        when(cacheService.getUserRoles("alice")).thenReturn(List.of("ACCOUNTANT"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/category/create_category", "POST")));
 
@@ -114,22 +114,22 @@ class DynamicAuthorizationManagerTest {
     @Test
     @DisplayName("已登記且角色被授權:放行")
     void registeredAndGranted_allowed() {
-        when(cacheService.getUserRoles("leader1")).thenReturn(List.of("LEADER"));
+        when(cacheService.getUserRoles("staff1")).thenReturn(List.of("ADMIN_STAFF"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/campaign/**", "DELETE")));
-        when(cacheService.getRoleResources("LEADER"))
+        when(cacheService.getRoleResources("ADMIN_STAFF"))
                 .thenReturn(List.of(resource("/campaign/**", "DELETE")));
 
-        assertThat(granted(user("leader1"), request("DELETE", "/campaign/42"))).isTrue();
+        assertThat(granted(user("staff1"), request("DELETE", "/campaign/42"))).isTrue();
     }
 
     @Test
     @DisplayName("已登記但角色未被授權:deny(403)")
     void registeredButNotGranted_denied() {
-        when(cacheService.getUserRoles("alice")).thenReturn(List.of("MEMBER"));
+        when(cacheService.getUserRoles("alice")).thenReturn(List.of("ACCOUNTANT"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/category/create_category", "POST")));
-        when(cacheService.getRoleResources("MEMBER")).thenReturn(List.of());
+        when(cacheService.getRoleResources("ACCOUNTANT")).thenReturn(List.of());
 
         assertThat(granted(user("alice"), request("POST", "/category/create_category"))).isFalse();
     }
@@ -137,11 +137,11 @@ class DynamicAuthorizationManagerTest {
     @Test
     @DisplayName("多角色取聯集:任一角色被授權即放行")
     void multiRole_unionGrants() {
-        when(cacheService.getUserRoles("hybrid")).thenReturn(List.of("CUSTOMER_SERVICE", "LEADER"));
+        when(cacheService.getUserRoles("hybrid")).thenReturn(List.of("CUSTOMER_SERVICE", "ADMIN_STAFF"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/campaign/**", "POST")));
         when(cacheService.getRoleResources("CUSTOMER_SERVICE")).thenReturn(List.of());
-        when(cacheService.getRoleResources("LEADER"))
+        when(cacheService.getRoleResources("ADMIN_STAFF"))
                 .thenReturn(List.of(resource("/campaign/**", "POST")));
 
         assertThat(granted(user("hybrid"), request("POST", "/campaign/create"))).isTrue();
@@ -163,10 +163,10 @@ class DynamicAuthorizationManagerTest {
     @Test
     @DisplayName("PathPattern 萬用字元:/campaign/** 命中巢狀路徑")
     void wildcardPattern_matchesNestedPath() {
-        when(cacheService.getUserRoles("alice")).thenReturn(List.of("MEMBER"));
+        when(cacheService.getUserRoles("alice")).thenReturn(List.of("ACCOUNTANT"));
         when(cacheService.getAllResources())
                 .thenReturn(List.of(resource("/campaign/**", "ALL")));
-        when(cacheService.getRoleResources("MEMBER")).thenReturn(List.of());
+        when(cacheService.getRoleResources("ACCOUNTANT")).thenReturn(List.of());
 
         // 已登記(deep path 也命中)但未授權 → deny
         assertThat(granted(user("alice"), request("DELETE", "/campaign/delete/42"))).isFalse();

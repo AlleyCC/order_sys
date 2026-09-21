@@ -122,6 +122,8 @@ Client (REST + WebSocket)
 | `POST /category/delete_category` | Yes + RBAC 授權(見 2.7) |
 | `GET /category/get_categories` | Yes |
 | `/admin/rbac/**` | Yes + 僅超級管理員(見 2.7) |
+| `GET /admin/orders/**` | Yes + RBAC 授權(客服,見 2.7) |
+| `GET /admin/transactions/**` | Yes + RBAC 授權(會計,見 2.7) |
 
 > 免登入白名單集中定義於 `SecurityConstants.WHITE_LIST`;「需要認證」的端點中,
 > 只有登記於 `resources` 表的才另外受 RBAC 角色授權管制,其餘登入即可。
@@ -171,7 +173,10 @@ app.password.public-key=../key/password_public.key
 users ──< user_roles >── roles ──< role_resources >── resources(url_pattern + http_method)
 ```
 
-- 角色:`SUPER_ADMIN`(超級管理員)、`LEADER`(團長)、`CUSTOMER_SERVICE`(客服)、`MEMBER`(一般成員)
+- 角色:`SUPER_ADMIN`(超級管理員)、`ADMIN_STAFF`(行政)、`CUSTOMER_SERVICE`(客服)、`ACCOUNTANT`(會計)
+- **`roles` 是員工名冊**:只收錄「全系統有效、由管理員指派、跟人走」的職能。
+  團長/團員是訂單週期內的身分(`orders.created_by` / `order_items.user_id`),不是角色;
+  一般使用者的 `user_roles` 為空(零角色),仍可使用所有未登記於 `resources` 的端點
 - **超級管理員恆具全部權限**:授權層程式碼不變量,不依賴 `role_resources`,不可經管理端移除
 - JWT access token 為**純身份憑證**(只含 `sub` + `jti`,無 role claim);
   「能做什麼」由 `DynamicAuthorizationManager` 每次請求查詢(Redis → DB)
@@ -218,7 +223,22 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 - 全量替換語意:空陣列 = 清空;含不存在的 id/name → 400 整批拒絕
 - 角色/使用者不存在 → 404;寫入成功後立即失效對應快取
 
-#### 2.7.6 資料表(V6/V7 migration)
+#### 2.7.6 後台唯讀端點(依角色授權)
+
+一般查詢端點只回呼叫者參與的資料(見 3.x 各端點);需要跨使用者檢視的職能改走獨立端點,
+由 `role_resources` 決定誰能呼叫。這些端點**只唯讀**,不提供任何資料異動能力。
+
+| Method | Path | 授權角色 | 說明 |
+|--------|------|---------|------|
+| GET | `/admin/orders/get_all_orders` | 客服 | 分頁取得全系統訂單 |
+| GET | `/admin/orders/get_order_detail?orderId=X` | 客服 | 取得任一訂單明細 |
+| GET | `/admin/transactions/get_user_transaction_record?userId=X` | 會計 | 取得指定使用者的交易紀錄(使用者不存在 → 404,不回空清單) |
+
+> 取消訂單與刪除品項**不走後台端點**:兩者維持原端點、不登記於 `resources`,
+> 由 service 層判斷「開團者 or 客服 / 超級管理員」。授權層回答「能不能呼叫這支 API」,
+> service 層回答「能不能動這一筆資料」。
+
+#### 2.7.7 資料表(V6/V7/V9/V10 migration)
 
 | 表 | 重點欄位 | 約束 |
 |----|---------|------|
@@ -227,7 +247,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 | `user_roles` | `user_id`、`role_id` | `UNIQUE(user_id, role_id)`、FK CASCADE |
 | `role_resources` | `role_id`、`resource_id` | `UNIQUE(role_id, resource_id)`、FK CASCADE |
 
-> `users.role` 舊欄位已停用(資料已搬遷至 `user_roles`),保留至下一次 migration 移除。
+> `users.role` 舊欄位已於 V9 移除(兩段式遷移完成),角色一律以 `user_roles` 為準。
 
 ---
 
@@ -364,9 +384,12 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### GET `/order/get_all_orders`
 
-取得所有訂單列表。
+取得**可跟團清單**:所有 OPEN 狀態的訂單,不以是否參與為條件(否則沒人能發現可跟的團)。
+只回摘要欄位(orderId、orderName、deadline、minOrderAmount),**不含參與者與品項** ——
+那些屬於訂單明細,只有參與者讀得到。
+需要檢視不限狀態的全系統訂單請改用 `GET /admin/orders/get_all_orders`(限客服)。
 
-**Request:** 無參數
+**Request:** 無參數(範圍以憑證身分決定)
 
 **Response 200 OK:**
 
@@ -385,13 +408,14 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### GET `/order/get_user_account`
 
-查詢使用者帳戶餘額。
+查詢**自己的**帳戶餘額。查詢對象一律取自憑證身分。
 
 **Request:**
 
 | 位置 | 欄位 | 型別 | 必填 | 說明 |
 |------|------|------|------|------|
-| Query | userId | String | Y | 使用者帳號 |
+
+無參數。舊版的 `userId` query param 已移除;即使帶入也會被忽略,不會回傳他人餘額。
 
 **Response 200 OK:**
 
@@ -412,7 +436,10 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### GET `/order/get_order_detail`
 
-取得訂單明細 (含所有使用者的訂購品項)。
+取得訂單明細 (含所有使用者的訂購品項)。**限該訂單的參與者**(發起者或曾在其中下單者);
+非參與者回 403,回應不含訂單任何欄位。**訂單不存在時同樣回 403**(與「不是你的訂單」
+完全相同的回應),否則可藉 403/404 的差別試出系統中存在哪些訂單。
+需要檢視任一訂單請改用 `GET /admin/orders/get_order_detail`(限客服)。
 
 **Request:**
 
@@ -526,11 +553,12 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 1. 確認訂單存在且狀態為 OPEN
 2. 確認訂單未過截止時間 (`deadline`)，已過期則拒絕
 3. 查詢 `menus` 取得 `product_name` 和 `unit_price`，驗證品項存在且供應中
-4. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN 及 FAILED 訂單的未結金額
-5. 餘額不足則拒絕
-6. 寫入 `order_items`（含品名與單價快照）
-7. 同一使用者可重複點相同品項（例如多訂幾份）
-8. 透過 WebSocket 推送當事人的可用餘額更新
+4. 以 `SELECT ... FOR UPDATE` 鎖住該使用者的 `users` 那一行，序列化同一使用者的併發下單（見 7.2「併發下單的凍結不變式」）
+5. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN 及 FAILED 訂單的未結金額（必須在取得鎖之後才讀）
+6. 餘額不足則拒絕
+7. 寫入 `order_items`（含品名與單價快照）
+8. 同一使用者可重複點相同品項（例如多訂幾份）
+9. 交易 commit 後，透過 WebSocket 推送當事人的可用餘額更新
 
 ---
 
@@ -559,9 +587,13 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 ```
 
 **權限規則:**
-- **admin**: 可刪除任何訂單中的任何品項
+- **客服 / 超級管理員**: 可刪除任何訂單中的任何品項(跨 ownership 的救援操作,
+  依呼叫者當下的系統角色判斷,角色撤銷後下一個請求立即失效)
 - **開團者** (orders.created_by): 可刪除自己開的團中所有品項
 - **一般使用者**: 只能刪除自己的品項
+
+> 本端點**未登記於 `resources`**:授權層只管「能不能呼叫這支 API」(登入即可),
+> 「能不能動這一筆」由 service 層判斷。
 
 **業務邏輯:**
 - 僅限訂單狀態為 OPEN 時可刪除
@@ -591,7 +623,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 **Response 403 / 400:**
 
 ```json
-{ "status": 403, "detail": "僅開團者或 admin 可取消訂單" }
+{ "status": 403, "detail": "僅開團者、客服或超級管理員可取消訂單" }
 { "status": 400, "detail": "僅 OPEN 或 CLOSED 狀態的訂單可取消" }
 ```
 
@@ -644,7 +676,8 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### GET `/user/get_user_transaction_record`
 
-查詢當前登入使用者的交易紀錄。
+查詢當前登入使用者的交易紀錄(**僅本人**)。會計對帳請改用
+`GET /admin/transactions/get_user_transaction_record?userId=X`。
 
 **Request:**
 
@@ -704,7 +737,6 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 | user_id | VARCHAR(20) | Y | Y | 使用者帳號 |
 | user_name | VARCHAR(20) | | Y | 使用者名稱 |
 | password | VARCHAR(256) | | Y | BCrypt 雜湊密碼 |
-| role | VARCHAR(10) | | Y | 角色: `employee`, `admin` |
 | balance | BIGINT | | Y | 帳戶餘額 (DEFAULT 0)，扣款使用 CAS 模式 |
 | created_at | DATETIME | | Y | 建立時間 (DEFAULT CURRENT_TIMESTAMP) |
 | updated_at | DATETIME | | Y | 更新時間 (ON UPDATE CURRENT_TIMESTAMP) |
@@ -1002,6 +1034,29 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 }
 ```
 
+#### 併發下單的凍結不變式
+
+**不變式：任一時刻，同一使用者的凍結總額不得超過其實際餘額**（即 `available_balance >= 0`）。
+
+**為什麼單純檢查會破：** 「算可用餘額」與「寫入 `order_items`」之間若沒有序列化，就是 check-then-act。兩個併發請求會讀到同一份可用餘額而雙雙放行 —— 餘額 100、兩筆各 70 同時進入，結果凍結 140、`available_balance` 變 -40。此時結算仍會被 CAS 擋下（訂單轉 FAILED、實際餘額不會被超扣），但凍結不變式已經破了，使用者會看到負的可用餘額。
+
+**作法：以 `users` 行鎖序列化**
+
+```sql
+SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
+```
+
+- 凍結金額是 `order_items` 上的 SUM，沒有單一實體可以鎖；因此改鎖 `users` 那一行 —— 鎖的對象不必是要保護的資料，只要是所有寫入者都必經的同一個點即可。
+- 鎖必須在**讀可用餘額之前**取得，並持有到交易 commit 才釋放。同一使用者的下單因此排隊，不同使用者之間互不阻塞。
+
+**隔離等級必須降到 READ_COMMITTED**
+
+`createUserOrder` 標註 `@Transactional(isolation = Isolation.READ_COMMITTED)`。MySQL 預設的 REPEATABLE READ 下，交易內第一個「一般 SELECT」（此處是查訂單的 `selectById`）就固定了快照；`SELECT ... FOR UPDATE` 雖是當前讀、拿得到鎖，但後續計算凍結金額的一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項 —— 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交資料，鎖才真的生效。
+
+**餘額通知延到 commit 之後才送**
+
+下單成功的 WebSocket 推送改為發佈 `BalanceChangedEvent`，由 `BalanceChangeNotifier` 以 `@TransactionalEventListener(AFTER_COMMIT)` 送出。兩個理由：交易若回滾，使用者不該收到「下單成功」；推播也不該被算進持鎖時間。
+
 ### 7.3 自動結算流程 (DelayQueue + @Transactional)
 
 ```
@@ -1134,6 +1189,9 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 | 餘額不足 | 400，detail: "餘額不足" |
 | 同一使用者重複點相同品項 | 201，新增一筆 order_items（允許） |
 | quantity <= 0 | 400 |
+| 餘額只夠一筆：併發下兩筆同一張單 | 只有一筆成功，凍結不超過餘額 |
+| 餘額夠兩筆：併發下兩筆 | 兩筆都成功（鎖不得誤殺） |
+| 同一人同時在兩張不同的團下單 | 凍結不變式仍成立 |
 
 #### delete_user_order
 
@@ -1143,9 +1201,9 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 | 一般使用者刪除別人的品項 | 403 |
 | 開團者刪除團內任意品項 | 200 |
 | 開團者刪除別人開的團的品項 | 403 |
-| admin 刪除任何品項 | 200 |
+| 客服或超管刪除任何品項 | 200 |
 | itemId="all"，開團者刪除整筆訂單 | 200，狀態 → CANCELLED，DelayQueue 任務移除 |
-| itemId="all"，非開團者且非 admin | 403 |
+| itemId="all"，非開團者且無客服/超管角色 | 403 |
 | 訂單非 OPEN 狀態時刪除 | 400 |
 
 #### get_order_detail

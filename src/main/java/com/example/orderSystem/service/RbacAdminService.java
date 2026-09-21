@@ -15,6 +15,8 @@ import com.example.orderSystem.mapper.UserMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 
@@ -36,6 +38,19 @@ public class RbacAdminService {
     private final UserRoleMapper userRoleMapper;
     private final UserMapper userMapper;
     private final RbacCacheService rbacCacheService;
+
+    private void evictAfterCommit(Runnable eviction) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            eviction.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                eviction.run();
+            }
+        });
+    }
 
     public List<Role> listRoles() {
         return roleMapper.selectList(null);
@@ -70,7 +85,7 @@ public class RbacAdminService {
         }
 
         // DB 寫完才失效快取;刪 key 失敗由 RbacCacheService 吞掉(TTL 兜底)
-        rbacCacheService.evictRoleResources(roleName);
+        evictAfterCommit(() -> rbacCacheService.evictRoleResources(roleName));
     }
 
     @Transactional
@@ -95,7 +110,7 @@ public class RbacAdminService {
             userRoleMapper.insert(ur);
         }
 
-        rbacCacheService.evictUserRoles(userId);
+        evictAfterCommit(() -> rbacCacheService.evictUserRoles(userId));
     }
 
     private Role requireRole(String roleName) {

@@ -32,6 +32,8 @@ public class OrderService {
 
     private static final DateTimeFormatter DATETIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    private static final Set<String> RESCUE_ROLES = Set.of("SUPER_ADMIN", "CUSTOMER_SERVICE");
+
     private final StoreMapper storeMapper;
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
@@ -41,21 +43,50 @@ public class OrderService {
     private final PaymentService paymentService;
     private final NotificationService notificationService;
     private final ApplicationEventPublisher eventPublisher;
+    private final RbacCacheService rbacCacheService;
 
     public List<Store> getAllShops() {
         return storeMapper.selectList(null);
     }
 
-    public IPage<Map<String, Object>> getAllOrders(int page, int size) {
+    public IPage<Map<String, Object>> getOpenOrders(int page, int size) {
+        return orderMapper.getOpenOrdersWithStore(new Page<>(page, size));
+    }
+
+    public OrderDetailResponse getOrderDetail(String orderId, String userId) {
+        OrderDetailResponse detail = orderMapper.getOrderDetail(orderId);
+        if (detail == null || detail.getOrderId() == null || !isParticipant(detail, userId)) {
+            throw new ForbiddenException("無權限查看此訂單");
+        }
+        return detail;
+    }
+
+    public IPage<Map<String, Object>> getAllOrdersUnscoped(int page, int size) {
         return orderMapper.getAllOrdersWithStore(new Page<>(page, size));
     }
 
-    public OrderDetailResponse getOrderDetail(String orderId) {
+    public OrderDetailResponse getOrderDetailUnscoped(String orderId) {
+        return loadOrderDetail(orderId);
+    }
+
+    private OrderDetailResponse loadOrderDetail(String orderId) {
         OrderDetailResponse detail = orderMapper.getOrderDetail(orderId);
         if (detail == null || detail.getOrderId() == null) {
             throw new ResourceNotFoundException("訂單不存在");
         }
         return detail;
+    }
+
+    private boolean canRescue(String userId) {
+        return rbacCacheService.getUserRoles(userId).stream().anyMatch(RESCUE_ROLES::contains);
+    }
+
+    private boolean isParticipant(OrderDetailResponse detail, String userId) {
+        if (userId.equals(detail.getCreatedBy())) {
+            return true;
+        }
+        return detail.getOrderItems() != null && detail.getOrderItems().stream()
+                .anyMatch(item -> userId.equals(item.getUserId()));
     }
 
     public Map<String, Object> getUserAccount(String userId) {
@@ -157,7 +188,7 @@ public class OrderService {
                 "下單：" + menu.getProductName() + " x" + request.getQuantity()));
     }
 
-    public void deleteUserOrder(DeleteOrderItemRequest request, String userId, String role) {
+    public void deleteUserOrder(DeleteOrderItemRequest request, String userId) {
         Order order = orderMapper.selectById(request.getOrderId());
         if (order == null) {
             throw new ResourceNotFoundException("訂單不存在");
@@ -167,8 +198,7 @@ public class OrderService {
         }
 
         if ("all".equals(request.getItemId())) {
-            // Cancel entire order — only owner or admin
-            if (!"admin".equals(role) && !order.getCreatedBy().equals(userId)) {
+            if (!order.getCreatedBy().equals(userId) && !canRescue(userId)) {
                 throw new ForbiddenException("無權限刪除此訂單");
             }
             order.setStatus(OrderStatus.CANCELLED);
@@ -182,10 +212,9 @@ public class OrderService {
                 throw new ResourceNotFoundException("品項不存在");
             }
             // Permission check
-            boolean isAdmin = "admin".equals(role);
             boolean isOwner = order.getCreatedBy().equals(userId);
             boolean isItemOwner = item.getUserId().equals(userId);
-            if (!isAdmin && !isOwner && !isItemOwner) {
+            if (!isOwner && !isItemOwner && !canRescue(userId)) {
                 throw new ForbiddenException("無權限刪除此品項");
             }
             orderItemMapper.deleteById(itemId);
@@ -198,13 +227,13 @@ public class OrderService {
         }
     }
 
-    public void cancelOrder(String orderId, String userId, String role) {
+    public void cancelOrder(String orderId, String userId) {
         Order order = orderMapper.selectById(orderId);
         if (order == null) {
             throw new ResourceNotFoundException("訂單不存在");
         }
-        if (!"admin".equals(role) && !order.getCreatedBy().equals(userId)) {
-            throw new ForbiddenException("僅開團者或 admin 可取消訂單");
+        if (!order.getCreatedBy().equals(userId) && !canRescue(userId)) {
+            throw new ForbiddenException("僅開團者、客服或超級管理員可取消訂單");
         }
         if (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.CLOSED) {
             throw new IllegalStateException("僅 OPEN 或 CLOSED 狀態的訂單可取消");

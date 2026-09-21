@@ -56,6 +56,8 @@ class OrderServiceTest {
     private NotificationService notificationService;
     @Mock
     private ApplicationEventPublisher eventPublisher;
+    @Mock
+    private RbacCacheService rbacCacheService;
 
     // ========== helpers ==========
 
@@ -233,7 +235,7 @@ class OrderServiceTest {
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
-                    deleteReq("ord-001", "1"), "alice", "employee"))
+                    deleteReq("ord-001", "1"), "alice"))
                     .doesNotThrowAnyException();
         }
 
@@ -247,16 +249,17 @@ class OrderServiceTest {
             when(orderItemMapper.selectById(1)).thenReturn(item);
 
             assertThatThrownBy(() -> orderService.deleteUserOrder(
-                    deleteReq("ord-001", "1"), "alice", "employee"))
+                    deleteReq("ord-001", "1"), "alice"))
                     .isInstanceOf(ForbiddenException.class);
         }
 
         @Test
-        @DisplayName("admin 可刪除任何品項")
-        void adminCanDelete() {
+        @DisplayName("具客服角色者可刪除任何品項(跨 ownership 救援)")
+        void rescueRoleCanDelete() {
             Order order = createOrder("ord-001", "bob", OrderStatus.OPEN);
             OrderItem item = createOrderItem(1, "ord-001", "charlie", 70);
 
+            when(rbacCacheService.getUserRoles("rescuer")).thenReturn(List.of("CUSTOMER_SERVICE"));
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
@@ -264,7 +267,7 @@ class OrderServiceTest {
             when(orderItemMapper.getFrozenAmount("charlie")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
-                    deleteReq("ord-001", "1"), "admin", "admin"))
+                    deleteReq("ord-001", "1"), "rescuer"))
                     .doesNotThrowAnyException();
         }
 
@@ -276,7 +279,7 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderMapper.updateById((Order) any())).thenReturn(1);
 
-            orderService.deleteUserOrder(deleteReq("ord-001", "all"), "alice", "employee");
+            orderService.deleteUserOrder(deleteReq("ord-001", "all"), "alice");
 
             assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         }
@@ -288,7 +291,7 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
 
             assertThatThrownBy(() -> orderService.deleteUserOrder(
-                    deleteReq("ord-001", "1"), "alice", "employee"))
+                    deleteReq("ord-001", "1"), "alice"))
                     .isInstanceOf(IllegalStateException.class);
         }
 
@@ -317,7 +320,7 @@ class OrderServiceTest {
                 return 1;
             });
 
-            orderService.cancelOrder("ord-001", "alice", "employee");
+            orderService.cancelOrder("ord-001", "alice");
 
             assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
         }
@@ -333,7 +336,7 @@ class OrderServiceTest {
                 return 1;
             });
 
-            orderService.cancelOrder("ord-001", "alice", "employee");
+            orderService.cancelOrder("ord-001", "alice");
 
             assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
         }
@@ -344,7 +347,7 @@ class OrderServiceTest {
             Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
 
-            assertThatThrownBy(() -> orderService.cancelOrder("ord-001", "bob", "employee"))
+            assertThatThrownBy(() -> orderService.cancelOrder("ord-001", "bob"))
                     .isInstanceOf(ForbiddenException.class);
         }
 
@@ -354,7 +357,7 @@ class OrderServiceTest {
             Order order = createOrder("ord-001", "alice", OrderStatus.SETTLED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
 
-            assertThatThrownBy(() -> orderService.cancelOrder("ord-001", "alice", "employee"))
+            assertThatThrownBy(() -> orderService.cancelOrder("ord-001", "alice"))
                     .isInstanceOf(IllegalStateException.class);
         }
     }
