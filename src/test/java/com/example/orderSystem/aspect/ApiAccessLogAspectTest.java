@@ -105,12 +105,12 @@ class ApiAccessLogAspectTest {
     class ErrorLogging {
 
         @Test
-        @DisplayName("不存在的訂單 → WARN log 含 exception 資訊")
+        @DisplayName("拋例外的請求 → WARN log 含 exception 資訊")
         void logsExceptionEndpoint(CapturedOutput output) throws Exception {
             mockMvc.perform(get("/order/get_order_detail")
                             .header("Authorization", "Bearer " + aliceToken)
                             .param("orderId", "non-existent-order"))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isForbidden());
 
             assertThat(output.getAll()).contains("[API-ERROR]");
             assertThat(output.getAll()).contains("exception=");

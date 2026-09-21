@@ -13,9 +13,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -36,24 +34,25 @@ public class OrderController {
     }
 
     @GetMapping("/order/get_all_orders")
-    @Operation(summary = "分頁取得訂單列表")
+    @Operation(summary = "分頁取得可跟團清單（僅 OPEN 狀態，摘要欄位）")
     public ResponseEntity<?> getAllOrders(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int size) {
-        return ResponseEntity.ok(orderService.getAllOrders(page, size));
+        return ResponseEntity.ok(orderService.getOpenOrders(page, size));
     }
 
     @GetMapping("/order/get_order_detail")
-    @Operation(summary = "取得單一訂單明細（品項、參與者、狀態）")
+    @Operation(summary = "取得單一訂單明細（限該訂單的參與者）")
     public ResponseEntity<OrderDetailResponse> getOrderDetail(
-            @RequestParam String orderId) {
-        return ResponseEntity.ok(orderService.getOrderDetail(orderId));
+            @RequestParam String orderId,
+            @AuthenticationPrincipal String userId) {
+        return ResponseEntity.ok(orderService.getOrderDetail(orderId, userId));
     }
 
     @GetMapping("/order/get_user_account")
-    @Operation(summary = "取得指定使用者的帳戶資訊（餘額等）")
+    @Operation(summary = "取得自己的帳戶資訊（餘額、可用餘額）")
     public ResponseEntity<Map<String, Object>> getUserAccount(
-            @RequestParam String userId) {
+            @AuthenticationPrincipal String userId) {
         return ResponseEntity.ok(orderService.getUserAccount(userId));
     }
 
@@ -75,20 +74,20 @@ public class OrderController {
     }
 
     @PostMapping("/order/delete_user_order")
-    @Operation(summary = "刪除自己的品項；管理員可刪除他人")
+    @Operation(summary = "刪除品項（自己的品項、自己團內的品項；客服與超管可跨團刪除）")
     public ResponseEntity<Map<String, String>> deleteUserOrder(
             @Valid @RequestBody DeleteOrderItemRequest request,
             @AuthenticationPrincipal String userId) {
-        orderService.deleteUserOrder(request, userId, getCurrentRole());
+        orderService.deleteUserOrder(request, userId);
         return ResponseEntity.ok(Map.of("message", "刪除成功"));
     }
 
     @PostMapping("/order/cancel_order")
-    @Operation(summary = "取消整筆訂單（限訂單發起人或管理員）")
+    @Operation(summary = "取消整筆訂單（限開團者、客服或超級管理員）")
     public ResponseEntity<Map<String, String>> cancelOrder(
             @RequestBody Map<String, String> body,
             @AuthenticationPrincipal String userId) {
-        orderService.cancelOrder(body.get("orderId"), userId, getCurrentRole());
+        orderService.cancelOrder(body.get("orderId"), userId);
         return ResponseEntity.ok(Map.of("message", "訂單已取消"));
     }
 
@@ -97,14 +96,5 @@ public class OrderController {
     public ResponseEntity<Map<String, String>> payOrder(@RequestBody Map<String, String> body) {
         orderService.payOrder(body.get("orderId"));
         return ResponseEntity.ok(Map.of("message", "扣款成功"));
-    }
-
-    private String getCurrentRole() {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth == null || auth.getAuthorities().isEmpty()) {
-            return "employee";
-        }
-        return auth.getAuthorities().iterator().next().getAuthority()
-                .replace("ROLE_", "").toLowerCase();
     }
 }

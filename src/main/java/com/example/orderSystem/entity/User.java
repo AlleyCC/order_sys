@@ -15,7 +15,6 @@ public class User {
     private String userId;
     private String userName;
     private String password;
-    private String role;
     private Long balance;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

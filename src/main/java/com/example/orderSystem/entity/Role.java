@@ -14,7 +14,7 @@ public class Role {
     @TableId(type = IdType.AUTO)
     private Long roleId;
 
-    /** 角色代碼(SUPER_ADMIN/LEADER/CUSTOMER_SERVICE/MEMBER),也是 Redis 快取 key 的成分 */
+    /** 角色代碼(SUPER_ADMIN/ADMIN_STAFF/CUSTOMER_SERVICE/ACCOUNTANT),也是 Redis 快取 key 的成分 */
     private String name;
 
     private String description;

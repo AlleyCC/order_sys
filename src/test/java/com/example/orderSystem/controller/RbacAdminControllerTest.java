@@ -9,8 +9,10 @@ import com.example.orderSystem.mapper.ResourceMapper;
 import com.example.orderSystem.mapper.RoleMapper;
 import com.example.orderSystem.mapper.RoleResourceMapper;
 import com.example.orderSystem.mapper.UserRoleMapper;
+import com.example.orderSystem.service.RbacCacheService;
 import com.example.orderSystem.support.AbstractIntegrationTest;
 import com.example.orderSystem.util.JwtUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -19,7 +21,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.hasItem;
@@ -34,8 +38,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 保護機制:V7 已把 /admin/rbac/** 登記進 resources 且不掛角色,
  * 所以「僅超管可用」不靠註解,靠動態授權層 + 超管不變量。
  *
- * 種子前提:admin=SUPER_ADMIN、alice/bob/charlie=MEMBER、
- * category 三資源 + /admin/rbac/** 資源、role_resources 為空。
+ * 種子前提:admin=SUPER_ADMIN、alice/bob/charlie 零角色、
+ * category 三資源掛 ADMIN_STAFF、後台唯讀資源分別掛 CUSTOMER_SERVICE / ACCOUNTANT。
  */
 class RbacAdminControllerTest extends AbstractIntegrationTest {
 
@@ -45,14 +49,42 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
     @Autowired ResourceMapper resourceMapper;
     @Autowired RoleResourceMapper roleResourceMapper;
     @Autowired UserRoleMapper userRoleMapper;
+    @Autowired RbacCacheService rbacCacheService;
 
     private String adminToken;
-    private String memberToken;
+    private String plainUserToken;
 
     @BeforeEach
     void setUp() {
         adminToken = jwtUtils.generateAccessToken("admin");
-        memberToken = jwtUtils.generateAccessToken("alice");
+        plainUserToken = jwtUtils.generateAccessToken("alice");
+    }
+
+    @AfterEach
+    void restoreSeededRbacState() {
+        grantResources("ADMIN_STAFF",
+                "/category/create_category", "/category/update_category", "/category/delete_category");
+        grantResources("CUSTOMER_SERVICE", "/admin/orders/**");
+        grantResources("ACCOUNTANT", "/admin/transactions/**");
+        clearUserRoles("bob");
+        clearUserRoles("charlie");
+    }
+
+    private void grantResources(String roleName, String... patterns) {
+        Long rid = roleId(roleName);
+        roleResourceMapper.delete(new QueryWrapper<RoleResource>().eq("role_id", rid));
+        for (String pattern : patterns) {
+            RoleResource rr = new RoleResource();
+            rr.setRoleId(rid);
+            rr.setResourceId(resourceId(pattern));
+            roleResourceMapper.insert(rr);
+        }
+        rbacCacheService.evictRoleResources(roleName);
+    }
+
+    private void clearUserRoles(String userId) {
+        userRoleMapper.delete(new QueryWrapper<UserRole>().eq("user_id", userId));
+        rbacCacheService.evictUserRoles(userId);
     }
 
     private Long roleId(String name) {
@@ -74,7 +106,7 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
                             .header("Authorization", "Bearer " + adminToken))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$[*].name", hasItems(
-                            "SUPER_ADMIN", "LEADER", "CUSTOMER_SERVICE", "MEMBER")));
+                            "SUPER_ADMIN", "ADMIN_STAFF", "CUSTOMER_SERVICE", "ACCOUNTANT")));
         }
 
         @Test
@@ -88,13 +120,13 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
         }
 
         @Test
-        @DisplayName("超管查某角色的資源 → 200(CUSTOMER_SERVICE 起始為空)")
+        @DisplayName("超管查某角色的資源 → 200,回傳該角色的種子授權")
         void listRoleResources() throws Exception {
             mockMvc.perform(get("/admin/rbac/get_role_resources")
                             .param("roleName", "CUSTOMER_SERVICE")
                             .header("Authorization", "Bearer " + adminToken))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$").isEmpty());
+                    .andExpect(jsonPath("$[*].urlPattern", hasItem("/admin/orders/**")));
         }
 
         @Test
@@ -110,7 +142,7 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
         @DisplayName("非超管查角色清單 → 403(動態授權層擋下)")
         void nonAdminForbidden() throws Exception {
             mockMvc.perform(get("/admin/rbac/get_roles")
-                            .header("Authorization", "Bearer " + memberToken))
+                            .header("Authorization", "Bearer " + plainUserToken))
                     .andExpect(status().isForbidden())
                     .andExpect(jsonPath("$.detail").value("權限不足"));
         }
@@ -128,11 +160,11 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
             mockMvc.perform(post("/admin/rbac/update_role_resources")
                             .header("Authorization", "Bearer " + adminToken)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"roleName\":\"LEADER\",\"resourceIds\":[" + categoryCreate + "]}"))
+                            .content("{\"roleName\":\"ADMIN_STAFF\",\"resourceIds\":[" + categoryCreate + "]}"))
                     .andExpect(status().isOk());
 
             mockMvc.perform(get("/admin/rbac/get_role_resources")
-                            .param("roleName", "LEADER")
+                            .param("roleName", "ADMIN_STAFF")
                             .header("Authorization", "Bearer " + adminToken))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$[*].urlPattern", hasItem("/category/create_category")));
@@ -146,7 +178,7 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
                     new QueryWrapper<RoleResource>().eq("role_id", roleId("CUSTOMER_SERVICE")));
 
             mockMvc.perform(post("/admin/rbac/update_role_resources")
-                            .header("Authorization", "Bearer " + memberToken)
+                            .header("Authorization", "Bearer " + plainUserToken)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"roleName\":\"CUSTOMER_SERVICE\",\"resourceIds\":[" + categoryDelete + "]}"))
                     .andExpect(status().isForbidden());
@@ -159,15 +191,18 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
         @Test
         @DisplayName("不存在的 resourceId → 400,整批不寫入")
         void unknownResourceId_rejected() throws Exception {
+            long before = roleResourceMapper.selectCount(
+                    new QueryWrapper<RoleResource>().eq("role_id", roleId("CUSTOMER_SERVICE")));
+
             mockMvc.perform(post("/admin/rbac/update_role_resources")
                             .header("Authorization", "Bearer " + adminToken)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"roleName\":\"CUSTOMER_SERVICE\",\"resourceIds\":[999999]}"))
                     .andExpect(status().isBadRequest());
 
-            long count = roleResourceMapper.selectCount(
+            long after = roleResourceMapper.selectCount(
                     new QueryWrapper<RoleResource>().eq("role_id", roleId("CUSTOMER_SERVICE")));
-            assertThat(count).isZero();
+            assertThat(after).isEqualTo(before);
         }
     }
 
@@ -181,7 +216,7 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
             mockMvc.perform(post("/admin/rbac/update_user_roles")
                             .header("Authorization", "Bearer " + adminToken)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"userId\":\"bob\",\"roleNames\":[\"MEMBER\",\"LEADER\"]}"))
+                            .content("{\"userId\":\"bob\",\"roleNames\":[\"ADMIN_STAFF\",\"CUSTOMER_SERVICE\"]}"))
                     .andExpect(status().isOk());
 
             List<UserRole> bobRoles = userRoleMapper.selectList(
@@ -195,7 +230,7 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
             mockMvc.perform(post("/admin/rbac/update_user_roles")
                             .header("Authorization", "Bearer " + adminToken)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"userId\":\"ghost\",\"roleNames\":[\"MEMBER\"]}"))
+                            .content("{\"userId\":\"ghost\",\"roleNames\":[\"ADMIN_STAFF\"]}"))
                     .andExpect(status().isNotFound());
         }
 

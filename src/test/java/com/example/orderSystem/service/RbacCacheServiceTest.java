@@ -65,11 +65,11 @@ class RbacCacheServiceTest {
     @Test
     @DisplayName("命中快取:直接回傳,不查 DB")
     void getUserRoles_cacheHit() {
-        when(valueOps.get("rbac:user-roles:alice")).thenReturn("[\"MEMBER\",\"LEADER\"]");
+        when(valueOps.get("rbac:user-roles:alice")).thenReturn("[\"ACCOUNTANT\",\"ADMIN_STAFF\"]");
 
         List<String> roles = service.getUserRoles("alice");
 
-        assertThat(roles).containsExactly("MEMBER", "LEADER");
+        assertThat(roles).containsExactly("ACCOUNTANT", "ADMIN_STAFF");
         verifyNoInteractions(roleMapper);
     }
 
@@ -88,24 +88,24 @@ class RbacCacheServiceTest {
     @DisplayName("未命中:查 DB 並回寫快取(含 TTL)")
     void getUserRoles_cacheMiss() {
         when(valueOps.get("rbac:user-roles:alice")).thenReturn(null);
-        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("MEMBER"));
+        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("ACCOUNTANT"));
 
         List<String> roles = service.getUserRoles("alice");
 
-        assertThat(roles).containsExactly("MEMBER");
+        assertThat(roles).containsExactly("ACCOUNTANT");
         // 回寫:同一個 key、JSON 內容、帶 TTL(任何正時長皆可,不綁死數值)
-        verify(valueOps).set(eq("rbac:user-roles:alice"), eq("[\"MEMBER\"]"), any());
+        verify(valueOps).set(eq("rbac:user-roles:alice"), eq("[\"ACCOUNTANT\"]"), any());
     }
 
     @Test
     @DisplayName("Redis 讀取炸掉:降級直查 DB,不拋例外、不嘗試回寫")
     void getUserRoles_redisDown_fallsBackToDb() {
         when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("redis down"));
-        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("MEMBER"));
+        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("ACCOUNTANT"));
 
         List<String> roles = service.getUserRoles("alice");
 
-        assertThat(roles).containsExactly("MEMBER");
+        assertThat(roles).containsExactly("ACCOUNTANT");
         verify(valueOps, never()).set(anyString(), anyString(), any());
     }
 
@@ -113,12 +113,12 @@ class RbacCacheServiceTest {
     @DisplayName("快取內容損毀(非法 JSON):視同未命中,查 DB 並覆寫")
     void getUserRoles_corruptedCache_treatedAsMiss() {
         when(valueOps.get("rbac:user-roles:alice")).thenReturn("not-json{{{");
-        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("MEMBER"));
+        when(roleMapper.selectRoleNamesByUserId("alice")).thenReturn(List.of("ACCOUNTANT"));
 
         List<String> roles = service.getUserRoles("alice");
 
-        assertThat(roles).containsExactly("MEMBER");
-        verify(valueOps).set(eq("rbac:user-roles:alice"), eq("[\"MEMBER\"]"), any());
+        assertThat(roles).containsExactly("ACCOUNTANT");
+        verify(valueOps).set(eq("rbac:user-roles:alice"), eq("[\"ACCOUNTANT\"]"), any());
     }
 
     // ---- getRoleResources ----
@@ -126,24 +126,24 @@ class RbacCacheServiceTest {
     @Test
     @DisplayName("角色資源未命中:查 DB 並回寫快取")
     void getRoleResources_cacheMiss() {
-        when(valueOps.get("rbac:role-resources:LEADER")).thenReturn(null);
-        when(resourceMapper.selectResourcesByRoleName("LEADER"))
+        when(valueOps.get("rbac:role-resources:ADMIN_STAFF")).thenReturn(null);
+        when(resourceMapper.selectResourcesByRoleName("ADMIN_STAFF"))
                 .thenReturn(List.of(resource("/campaign/**", "DELETE")));
 
-        List<Resource> resources = service.getRoleResources("LEADER");
+        List<Resource> resources = service.getRoleResources("ADMIN_STAFF");
 
         assertThat(resources).hasSize(1);
         assertThat(resources.get(0).getUrlPattern()).isEqualTo("/campaign/**");
-        verify(valueOps).set(eq("rbac:role-resources:LEADER"), anyString(), any());
+        verify(valueOps).set(eq("rbac:role-resources:ADMIN_STAFF"), anyString(), any());
     }
 
     @Test
     @DisplayName("角色資源命中快取:反序列化回傳,不查 DB")
     void getRoleResources_cacheHit() {
-        when(valueOps.get("rbac:role-resources:LEADER"))
+        when(valueOps.get("rbac:role-resources:ADMIN_STAFF"))
                 .thenReturn("[{\"urlPattern\":\"/campaign/**\",\"httpMethod\":\"DELETE\"}]");
 
-        List<Resource> resources = service.getRoleResources("LEADER");
+        List<Resource> resources = service.getRoleResources("ADMIN_STAFF");
 
         assertThat(resources).hasSize(1);
         assertThat(resources.get(0).getHttpMethod()).isEqualTo("DELETE");
@@ -154,10 +154,10 @@ class RbacCacheServiceTest {
     @DisplayName("Redis 炸掉:角色資源降級直查 DB")
     void getRoleResources_redisDown_fallsBackToDb() {
         when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("redis down"));
-        when(resourceMapper.selectResourcesByRoleName("LEADER"))
+        when(resourceMapper.selectResourcesByRoleName("ADMIN_STAFF"))
                 .thenReturn(List.of(resource("/campaign/**", "ALL")));
 
-        List<Resource> resources = service.getRoleResources("LEADER");
+        List<Resource> resources = service.getRoleResources("ADMIN_STAFF");
 
         assertThat(resources).hasSize(1);
     }
@@ -199,8 +199,8 @@ class RbacCacheServiceTest {
     @Test
     @DisplayName("失效角色資源快取:刪對應 key")
     void evictRoleResources_deletesKey() {
-        service.evictRoleResources("LEADER");
-        verify(redisTemplate).delete("rbac:role-resources:LEADER");
+        service.evictRoleResources("ADMIN_STAFF");
+        verify(redisTemplate).delete("rbac:role-resources:ADMIN_STAFF");
     }
 
     @Test
@@ -210,6 +210,6 @@ class RbacCacheServiceTest {
                 .when(redisTemplate).delete(anyString());
 
         assertThatCode(() -> service.evictUserRoles("alice")).doesNotThrowAnyException();
-        assertThatCode(() -> service.evictRoleResources("LEADER")).doesNotThrowAnyException();
+        assertThatCode(() -> service.evictRoleResources("ADMIN_STAFF")).doesNotThrowAnyException();
     }
 }

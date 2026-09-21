@@ -56,7 +56,6 @@ class AuthServiceTest {
         user.setUserId(userId);
         user.setUserName(userId);
         user.setPassword(encoder.encode(rawPassword));
-        user.setRole("employee");
         return user;
     }
 
