@@ -1,11 +1,14 @@
 package com.example.orderSystem.controller;
 
+import com.example.orderSystem.dto.request.PageLimits;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
 import com.example.orderSystem.dto.response.TransactionResponse;
 import com.example.orderSystem.service.OrderService;
 import com.example.orderSystem.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -25,8 +28,10 @@ public class AdminQueryController {
     @GetMapping("/admin/orders/get_all_orders")
     @Operation(summary = "分頁取得全系統訂單（客服）")
     public ResponseEntity<?> getAllOrders(
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int size) {
+            @RequestParam(defaultValue = "1") @Min(value = 1, message = PageLimits.PAGE_MESSAGE) int page,
+            @RequestParam(defaultValue = "10")
+            @Min(value = 1, message = PageLimits.SIZE_MESSAGE)
+            @Max(value = PageLimits.MAX_SIZE, message = PageLimits.SIZE_MESSAGE) int size) {
         return ResponseEntity.ok(orderService.getAllOrdersUnscoped(page, size));
     }
 

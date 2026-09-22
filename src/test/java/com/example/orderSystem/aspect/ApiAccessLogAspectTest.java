@@ -76,12 +76,14 @@ class ApiAccessLogAspectTest {
         @Test
         @DisplayName("公開 API → INFO log 含 method、URI、anonymous、耗時")
         void logsPublicEndpoint(CapturedOutput output) throws Exception {
-            mockMvc.perform(get("/order/get_all_shops"))
+            mockMvc.perform(post("/login/logout")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{}"))
                     .andExpect(status().isOk());
 
             assertThat(output.getAll()).contains("[API]");
-            assertThat(output.getAll()).contains("GET");
-            assertThat(output.getAll()).contains("/order/get_all_shops");
+            assertThat(output.getAll()).contains("POST");
+            assertThat(output.getAll()).contains("/login/logout");
             assertThat(output.getAll()).contains("anonymous");
             assertThat(output.getAll()).contains("ms");
         }

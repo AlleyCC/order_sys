@@ -4,12 +4,14 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.OrderItem;
 import com.example.orderSystem.entity.Role;
+import com.example.orderSystem.entity.Store;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.entity.UserRole;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
 import com.example.orderSystem.mapper.RoleMapper;
+import com.example.orderSystem.mapper.StoreMapper;
 import com.example.orderSystem.mapper.UserMapper;
 import com.example.orderSystem.mapper.UserRoleMapper;
 import com.example.orderSystem.service.RbacCacheService;
@@ -23,10 +25,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.web.servlet.MockMvc;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.MediaType;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +73,9 @@ class OrderControllerTest extends AbstractIntegrationTest {
     @Autowired
     private RbacCacheService rbacCacheService;
 
+    @Autowired
+    private StoreMapper storeMapper;
+
     private String aliceToken;
     private String bobToken;
     private String adminToken;
@@ -72,6 +83,7 @@ class OrderControllerTest extends AbstractIntegrationTest {
 
     private static final String RESCUER = "fx-orderctl-rescuer";
     private static final String RESCUE_PREFIX = "ord-rescue-";
+    private static final String PAGING_STORE_PREFIX = "分頁測試店-";
 
     @BeforeEach
     void setUp() {
@@ -87,6 +99,15 @@ class OrderControllerTest extends AbstractIntegrationTest {
         setRescuerRoles();
         orderItemMapper.delete(new QueryWrapper<OrderItem>().likeRight("order_id", RESCUE_PREFIX));
         orderMapper.delete(new QueryWrapper<Order>().likeRight("order_id", RESCUE_PREFIX));
+        storeMapper.delete(new QueryWrapper<Store>().likeRight("store_name", PAGING_STORE_PREFIX));
+    }
+
+    private void seedStore(String storeId, String storeName, int minOrderAmount) {
+        Store store = new Store();
+        store.setStoreId(storeId);
+        store.setStoreName(storeName);
+        store.setMinOrderAmount(minOrderAmount);
+        storeMapper.insert(store);
     }
 
     private void ensureUser(String userId) {
@@ -144,14 +165,157 @@ class OrderControllerTest extends AbstractIntegrationTest {
     class GetAllShops {
 
         @Test
-        @DisplayName("不需認證 → 200, 回傳店家列表")
-        void returnsAllShops() throws Exception {
+        @DisplayName("無 Token → 401(已移出白名單)")
+        void noTokenUnauthorized() throws Exception {
             mockMvc.perform(get("/order/get_all_shops"))
+                    .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("零角色的一般使用者 → 200(不需特定角色)")
+        void zeroRoleUserCanList() throws Exception {
+            setRescuerRoles();
+
+            mockMvc.perform(get("/order/get_all_shops")
+                            .header("Authorization", "Bearer " + rescuerToken))
+                    .andExpect(status().isOk());
+        }
+
+
+        @Test
+        @DisplayName("回傳分頁物件:records + page + size + total + totalPages")
+        void returnsPageObject() throws Exception {
+            mockMvc.perform(get("/order/get_all_shops")
+                            .header("Authorization", "Bearer " + aliceToken))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$", hasSize(3)))
-                    .andExpect(jsonPath("$[0].storeId").isNotEmpty())
-                    .andExpect(jsonPath("$[0].storeName").isNotEmpty())
-                    .andExpect(jsonPath("$[0].minOrderAmount").isNumber());
+                    .andExpect(jsonPath("$.records").isArray())
+                    .andExpect(jsonPath("$.page").value(1))
+                    .andExpect(jsonPath("$.size").value(10))
+                    .andExpect(jsonPath("$.total").value(greaterThanOrEqualTo(3)))
+                    .andExpect(jsonPath("$.totalPages").isNumber());
+        }
+
+        @Test
+        @DisplayName("每筆店家恰好只有 storeId / storeName / minOrderAmount(不外洩電話、地址、時間戳)")
+        void recordsCarrySummaryFieldsOnly() throws Exception {
+            JsonNode first = queryShops(Map.of()).get("records").get(0);
+
+            Set<String> fields = new HashSet<>();
+            first.fieldNames().forEachRemaining(fields::add);
+            assertThat(fields).containsExactlyInAnyOrder("storeId", "storeName", "minOrderAmount");
+        }
+
+
+        @Test
+        @DisplayName("依低消由低到高:seed 的三家店順序為 250 → 300 → 350")
+        void sortedByMinOrderAmount() throws Exception {
+            List<String> ids = storeIds(queryShops(Map.of("size", "20")));
+
+            List<String> seedOrder = ids.stream()
+                    .filter(List.of("store001", "store002", "store003")::contains)
+                    .toList();
+            assertThat(seedOrder).containsExactly("store002", "store003", "store001");
+        }
+
+        @Test
+        @DisplayName("同低消時逐頁查完:不重複、不遺漏,且同值依 storeId 排序")
+        void sameAmountPagesAreStable() throws Exception {
+            List<String> inserted = List.of("pg-test-3", "pg-test-1", "pg-test-5", "pg-test-2", "pg-test-4");
+            inserted.forEach(id -> seedStore(id, PAGING_STORE_PREFIX + id, 0));
+
+            List<String> collected = new ArrayList<>();
+            for (int page = 1; page <= 3; page++) {
+                JsonNode res = queryShops(Map.of(
+                        "storeName", PAGING_STORE_PREFIX, "page", String.valueOf(page), "size", "2"));
+                assertThat(res.get("total").asLong()).isEqualTo(5);
+                assertThat(res.get("totalPages").asLong()).isEqualTo(3);
+                collected.addAll(storeIds(res));
+            }
+
+            assertThat(collected).containsExactly("pg-test-1", "pg-test-2", "pg-test-3", "pg-test-4", "pg-test-5");
+        }
+
+        @Test
+        @DisplayName("page 超過總頁數 → 200 + 空 records(total 照常)")
+        void pageBeyondLastIsEmpty() throws Exception {
+            long total = queryShops(Map.of()).get("total").asLong();
+
+            JsonNode res = queryShops(Map.of("page", "99999"));
+            assertThat(res.get("records")).isEmpty();
+            assertThat(res.get("total").asLong()).isEqualTo(total);
+        }
+
+        @Test
+        @DisplayName("size=21 超過上限 → 400")
+        void sizeOverLimitRejected() throws Exception {
+            mockMvc.perform(get("/order/get_all_shops")
+                            .param("size", "21")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+
+        @Test
+        @DisplayName("storeName=八方 → 只回八方雲集")
+        void filterByPartialName() throws Exception {
+            JsonNode res = queryShops(Map.of("storeName", "八方"));
+
+            assertThat(res.get("total").asLong()).isEqualTo(1);
+            assertThat(res.get("records").get(0).get("storeName").asText()).isEqualTo("八方雲集(烏日店)");
+        }
+
+        @Test
+        @DisplayName("storeName 空字串或只有空白 → 視同沒帶")
+        void blankNameTreatedAsAbsent() throws Exception {
+            long total = queryShops(Map.of()).get("total").asLong();
+
+            assertThat(queryShops(Map.of("storeName", "")).get("total").asLong()).isEqualTo(total);
+            assertThat(queryShops(Map.of("storeName", "   ")).get("total").asLong()).isEqualTo(total);
+        }
+
+        @Test
+        @DisplayName("storeName=% → 當一般字元,不是萬用字元(否則會查出全部)")
+        void percentIsLiteral() throws Exception {
+            JsonNode res = queryShops(Map.of("storeName", "%"));
+
+            assertThat(res.get("records")).isEmpty();
+            assertThat(res.get("total").asLong()).isZero();
+        }
+
+        @Test
+        @DisplayName("storeName=_ → 當一般字元,不是萬用字元(否則任何名稱都會中)")
+        void underscoreIsLiteral() throws Exception {
+            JsonNode res = queryShops(Map.of("storeName", "_"));
+
+            assertThat(res.get("records")).isEmpty();
+            assertThat(res.get("total").asLong()).isZero();
+        }
+
+        @Test
+        @DisplayName("無符合結果 → 200,total=0,totalPages=0")
+        void noMatchReturnsEmptyPage() throws Exception {
+            JsonNode res = queryShops(Map.of("storeName", "不存在的店名xyz"));
+
+            assertThat(res.get("records")).isEmpty();
+            assertThat(res.get("total").asLong()).isZero();
+            assertThat(res.get("totalPages").asLong()).isZero();
+        }
+
+
+        private JsonNode queryShops(Map<String, String> params) throws Exception {
+            var request = get("/order/get_all_shops").header("Authorization", "Bearer " + aliceToken);
+            params.forEach(request::param);
+            String body = mockMvc.perform(request)
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString();
+            return objectMapper.readTree(body);
+        }
+
+        private List<String> storeIds(JsonNode pageJson) {
+            List<String> ids = new ArrayList<>();
+            pageJson.get("records").forEach(r -> ids.add(r.get("storeId").asText()));
+            return ids;
         }
     }
 
@@ -193,6 +357,46 @@ class OrderControllerTest extends AbstractIntegrationTest {
         void noToken() throws Exception {
             mockMvc.perform(get("/order/get_all_orders"))
                     .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("page=0 → 400,detail 指出 page")
+        void pageZeroRejected() throws Exception {
+            mockMvc.perform(get("/order/get_all_orders")
+                            .param("page", "0")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("page")));
+        }
+
+        @Test
+        @DisplayName("size=0 → 400,detail 指出 size")
+        void sizeZeroRejected() throws Exception {
+            mockMvc.perform(get("/order/get_all_orders")
+                            .param("size", "0")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+        @Test
+        @DisplayName("size=21 超過上限 → 400(不能靠灌大 size 一次撈光)")
+        void sizeOverLimitRejected() throws Exception {
+            mockMvc.perform(get("/order/get_all_orders")
+                            .param("size", "21")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+        @Test
+        @DisplayName("size=20 剛好是上限 → 200")
+        void sizeAtLimitAccepted() throws Exception {
+            mockMvc.perform(get("/order/get_all_orders")
+                            .param("size", "20")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.size").value(20));
         }
 
         @Test

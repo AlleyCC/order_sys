@@ -5,6 +5,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -12,6 +13,15 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
         String message = ex.getBindingResult().getFieldErrors().stream()
+                .map(e -> e.getDefaultMessage())
+                .findFirst()
+                .orElse("請求參數錯誤");
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, message);
+    }
+
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ProblemDetail handleMethodValidation(HandlerMethodValidationException ex) {
+        String message = ex.getAllErrors().stream()
                 .map(e -> e.getDefaultMessage())
                 .findFirst()
                 .orElse("請求參數錯誤");

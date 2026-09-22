@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.example.orderSystem.dto.request.CategoryDeleteRequest;
 import com.example.orderSystem.dto.request.CategoryRequest;
 import com.example.orderSystem.dto.request.CategoryUpdateRequest;
+import com.example.orderSystem.dto.request.PageLimits;
 import com.example.orderSystem.dto.response.CategoryResponse;
 import com.example.orderSystem.dto.response.PageResponse;
 import com.example.orderSystem.entity.Category;
@@ -12,6 +13,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 
 import java.util.Map;
@@ -81,8 +84,10 @@ public class CategoryController {
     public ResponseEntity<PageResponse<CategoryResponse>> getCategories(
             @RequestParam(required = false) Integer categoryId,
             @RequestParam(required = false) String categoryName,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int size) {
+            @RequestParam(defaultValue = "1") @Min(value = 1, message = PageLimits.PAGE_MESSAGE) int page,
+            @RequestParam(defaultValue = "10")
+            @Min(value = 1, message = PageLimits.SIZE_MESSAGE)
+            @Max(value = PageLimits.MAX_SIZE, message = PageLimits.SIZE_MESSAGE) int size) {
         IPage<Category> result = categoryService.getCategories(categoryId, categoryName, page, size);
         return ResponseEntity.ok(PageResponse.from(result, CategoryResponse::from));
     }

@@ -18,6 +18,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -510,7 +511,7 @@ class CategoryControllerTest extends AbstractIntegrationTest {
             createCategory("查詢-排序B", 32);
             createCategory("查詢-排序A", 31);
 
-            JsonNode res = queryPage(1, 100);
+            JsonNode res = queryPage(1, 20);
             JsonNode records = res.get("records");
             for (int i = 1; i < records.size(); i++) {
                 int prevOrder = records.get(i - 1).get("sortOrder").asInt();
@@ -568,16 +569,28 @@ class CategoryControllerTest extends AbstractIntegrationTest {
             mockMvc.perform(get("/category/get_categories")
                             .param("page", "0")
                             .header("Authorization", "Bearer " + employeeToken))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("page")));
         }
 
         @Test
-        @DisplayName("size 超過上限 100 → 400(不能靠灌大 size 繞過分頁)")
+        @DisplayName("size 超過上限 20 → 400(不能靠灌大 size 繞過分頁)")
         void sizeOverLimitRejected() throws Exception {
             mockMvc.perform(get("/category/get_categories")
-                            .param("size", "101")
+                            .param("size", "21")
                             .header("Authorization", "Bearer " + employeeToken))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+        @Test
+        @DisplayName("size=20 剛好是上限 → 200")
+        void sizeAtLimitAccepted() throws Exception {
+            mockMvc.perform(get("/category/get_categories")
+                            .param("size", "20")
+                            .header("Authorization", "Bearer " + employeeToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.size").value(20));
         }
 
         @Test
