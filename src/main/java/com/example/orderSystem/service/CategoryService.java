@@ -125,9 +125,6 @@ public class CategoryService {
         }
     }
 
-    // 分頁上限:防止 client 用超大 size 一次撈全表,架空分頁的意義。
-    private static final int MAX_PAGE_SIZE = 100;
-
     /**
      * 查詢分類(任何登入者)。categoryId / categoryName 擇一過濾,都不帶 = 查全部。
      * name 是精確比對(前端流程是先撈清單再用 id 查,模糊查詢目前不需要)。
@@ -139,12 +136,6 @@ public class CategoryService {
 
         if (categoryId != null && name != null) {
             throw new BadRequestException("categoryId 與 categoryName 不可同時使用");
-        }
-        if (page < 1) {
-            throw new BadRequestException("page 必須大於等於 1");
-        }
-        if (size < 1 || size > MAX_PAGE_SIZE) {
-            throw new BadRequestException("size 必須介於 1 到 " + MAX_PAGE_SIZE);
         }
 
         // 排序必須「完全決定順序」:sortOrder 可能同值,要再用 categoryId 補穩定性,

@@ -19,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -91,6 +92,54 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
                     .andExpect(jsonPath("$.records", hasSize(greaterThanOrEqualTo(2))))
                     .andExpect(jsonPath("$.total").value(greaterThanOrEqualTo(2)))
                     .andExpect(jsonPath("$.records[?(@.orderId == 'ord-001')]", hasSize(1)));
+        }
+
+        @Test
+        @DisplayName("page=0 → 400,detail 指出 page")
+        void pageZeroRejected() throws Exception {
+            setStaffRoles("CUSTOMER_SERVICE");
+
+            mockMvc.perform(get("/admin/orders/get_all_orders")
+                            .param("page", "0")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("page")));
+        }
+
+        @Test
+        @DisplayName("size=0 → 400,detail 指出 size")
+        void sizeZeroRejected() throws Exception {
+            setStaffRoles("CUSTOMER_SERVICE");
+
+            mockMvc.perform(get("/admin/orders/get_all_orders")
+                            .param("size", "0")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+        @Test
+        @DisplayName("size=21 超過上限 → 400(後台也不能一次撈光全系統訂單)")
+        void sizeOverLimitRejected() throws Exception {
+            setStaffRoles("CUSTOMER_SERVICE");
+
+            mockMvc.perform(get("/admin/orders/get_all_orders")
+                            .param("size", "21")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail").value(containsString("size")));
+        }
+
+        @Test
+        @DisplayName("size=20 剛好是上限 → 200")
+        void sizeAtLimitAccepted() throws Exception {
+            setStaffRoles("CUSTOMER_SERVICE");
+
+            mockMvc.perform(get("/admin/orders/get_all_orders")
+                            .param("size", "20")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.size").value(20));
         }
 
         @Test

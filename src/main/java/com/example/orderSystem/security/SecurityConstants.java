@@ -10,7 +10,6 @@ public final class SecurityConstants {
             "/login/create_token",
             "/login/logout",
             "/auth/refresh",
-            "/order/get_all_shops",
             "/ws/**",
             "/swagger-ui.html",
             "/swagger-ui/**",

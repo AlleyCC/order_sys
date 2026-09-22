@@ -19,6 +19,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -45,8 +46,21 @@ public class OrderService {
     private final ApplicationEventPublisher eventPublisher;
     private final RbacCacheService rbacCacheService;
 
-    public List<Store> getAllShops() {
-        return storeMapper.selectList(null);
+    public IPage<Store> getAllShops(String storeName, int page, int size) {
+        String name = StringUtils.hasText(storeName) ? escapeLike(storeName.trim()) : null;
+
+        LambdaQueryWrapper<Store> query = new LambdaQueryWrapper<Store>()
+                .like(name != null, Store::getStoreName, name)
+                .orderByAsc(Store::getMinOrderAmount)
+                .orderByAsc(Store::getStoreId);
+
+        return storeMapper.selectPage(new Page<>(page, size), query);
+    }
+
+    private static String escapeLike(String value) {
+        return value.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
     }
 
     public IPage<Map<String, Object>> getOpenOrders(int page, int size) {

@@ -1,22 +1,26 @@
 package com.example.orderSystem.controller;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.example.orderSystem.dto.request.CreateOrderItemRequest;
 import com.example.orderSystem.dto.request.CreateOrderRequest;
 import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
+import com.example.orderSystem.dto.request.PageLimits;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
+import com.example.orderSystem.dto.response.PageResponse;
+import com.example.orderSystem.dto.response.StoreResponse;
 import com.example.orderSystem.entity.Store;
 import com.example.orderSystem.service.OrderService;
 import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -27,17 +31,24 @@ public class OrderController {
     private final OrderService orderService;
 
     @GetMapping("/order/get_all_shops")
-    @SecurityRequirements
-    @Operation(summary = "取得所有可開團的店家清單（公開端點）")
-    public ResponseEntity<List<Store>> getAllShops() {
-        return ResponseEntity.ok(orderService.getAllShops());
+    @Operation(summary = "分頁取得可開團的店家清單（依低消由低到高；storeName 部分比對）")
+    public ResponseEntity<PageResponse<StoreResponse>> getAllShops(
+            @RequestParam(required = false) String storeName,
+            @RequestParam(defaultValue = "1") @Min(value = 1, message = PageLimits.PAGE_MESSAGE) int page,
+            @RequestParam(defaultValue = "10")
+            @Min(value = 1, message = PageLimits.SIZE_MESSAGE)
+            @Max(value = PageLimits.MAX_SIZE, message = PageLimits.SIZE_MESSAGE) int size) {
+        IPage<Store> result = orderService.getAllShops(storeName, page, size);
+        return ResponseEntity.ok(PageResponse.from(result, StoreResponse::from));
     }
 
     @GetMapping("/order/get_all_orders")
     @Operation(summary = "分頁取得可跟團清單（僅 OPEN 狀態，摘要欄位）")
     public ResponseEntity<?> getAllOrders(
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int size) {
+            @RequestParam(defaultValue = "1") @Min(value = 1, message = PageLimits.PAGE_MESSAGE) int page,
+            @RequestParam(defaultValue = "10")
+            @Min(value = 1, message = PageLimits.SIZE_MESSAGE)
+            @Max(value = PageLimits.MAX_SIZE, message = PageLimits.SIZE_MESSAGE) int size) {
         return ResponseEntity.ok(orderService.getOpenOrders(page, size));
     }
 

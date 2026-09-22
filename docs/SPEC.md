@@ -106,7 +106,7 @@ Client (REST + WebSocket)
 | `POST /login/create_token` | No |
 | `POST /auth/refresh` | No |
 | `POST /login/logout` | Yes |
-| `GET /order/get_all_shops` | No |
+| `GET /order/get_all_shops` | Yes |
 | `GET /order/get_all_orders` | Yes |
 | `GET /order/get_user_account` | Yes |
 | `GET /order/get_order_detail` | Yes |
@@ -281,6 +281,23 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 > 注：實際回應中 Spring Boot 會自動附帶 `type`、`title`、`instance` 欄位（RFC 7807 規範），文件中省略。
 
+#### 分頁參數
+
+分頁查詢端點共用同一組 query 參數契約,範圍宣告在 controller 參數上(`PageLimits`):
+
+| 欄位 | 型別 | 必填 | 預設 | 合法範圍 |
+|------|------|------|------|---------|
+| page | int | N | 1 | `>= 1` |
+| size | int | N | 10 | `1 ~ 20` |
+
+超出範圍回 400(不會自動修正成合法值),`detail` 指出是哪個參數,例如:
+
+```json
+{ "status": 400, "detail": "size 必須介於 1 到 20" }
+```
+
+適用端點:`GET /order/get_all_shops`、`GET /order/get_all_orders`、`GET /admin/orders/get_all_orders`、`GET /category/get_categories`。
+
 ---
 
 ### 3.2 認證 API
@@ -364,21 +381,32 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### GET `/order/get_all_shops`
 
-取得所有店家列表。
+分頁取得店家列表(需登入,任何角色皆可)。依 `minOrderAmount` 由低到高排序,同值再依 `storeId` 排序,確保翻頁時不重複、不遺漏。
 
-**Request:** 無參數
+**Request:**
+
+| 位置 | 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|------|
+| Query | storeName | String | N | 店家名稱部分比對;前後空白忽略,空白視同未帶。`%`、`_` 視為一般字元 |
+| Query | page / size | int | N | 見 3.1「分頁參數」 |
 
 **Response 200 OK:**
 
 ```json
-[
-  {
-    "storeId": "store001",
-    "storeName": "八方雲集(烏日店)",
-    "minOrderAmount": 350
-  }
-]
+{
+  "records": [
+    { "storeId": "store002", "storeName": "茶湯會(烏日中山店)", "minOrderAmount": 250 },
+    { "storeId": "store003", "storeName": "炒飯超人(公益店)",   "minOrderAmount": 300 },
+    { "storeId": "store001", "storeName": "八方雲集(烏日店)",   "minOrderAmount": 350 }
+  ],
+  "page": 1,
+  "size": 10,
+  "total": 3,
+  "totalPages": 1
+}
 ```
+
+每筆只回 `storeId`、`storeName`、`minOrderAmount`,不含電話、地址與時間戳。
 
 ---
 
@@ -389,7 +417,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 那些屬於訂單明細,只有參與者讀得到。
 需要檢視不限狀態的全系統訂單請改用 `GET /admin/orders/get_all_orders`(限客服)。
 
-**Request:** 無參數(範圍以憑證身分決定)
+**Request:** `page` / `size`,見 3.1「分頁參數」
 
 **Response 200 OK:**
 

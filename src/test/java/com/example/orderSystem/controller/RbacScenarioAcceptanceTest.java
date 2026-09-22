@@ -154,7 +154,7 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
     // ---- 情境 4:未登入 401,白名單仍可用 ----
 
     @Test
-    @DisplayName("情境4:無憑證 → 401「未登入」;白名單(登入/公開查詢)不受影響")
+    @DisplayName("情境4:無憑證 → 401「未登入」;白名單(API 文件頁)不受影響")
     void scenario4_unauthenticatedIs401AndWhitelistOpen() throws Exception {
         // 無憑證 → 401,語意與 403 可區分
         mockMvc.perform(get("/category/get_categories"))
@@ -167,9 +167,8 @@ class RbacScenarioAcceptanceTest extends AbstractIntegrationTest {
                         .header("Authorization", "Bearer not.a.jwt"))
                 .andExpect(status().isUnauthorized());
 
-        // 白名單:公開查詢端點未登入仍成功
         mockMvc.perform(get("/order/get_all_shops"))
-                .andExpect(status().isOk());
+                .andExpect(status().isUnauthorized());
 
         // 白名單:API 文件頁未登入仍成功
         mockMvc.perform(get("/v3/api-docs"))

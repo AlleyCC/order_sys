@@ -299,26 +299,6 @@ class CategoryServiceTest {
         }
 
         @Test
-        @DisplayName("page < 1 → 丟 BadRequest")
-        void pageBelowOneRejected() {
-            assertThatThrownBy(() ->
-                    categoryService.getCategories(null, null, 0, 10))
-                    .isInstanceOf(BadRequestException.class);
-
-            verify(categoryMapper, never()).selectPage(any(), any());
-        }
-
-        @Test
-        @DisplayName("size 超過上限 100 → 丟 BadRequest(防止繞過分頁)")
-        void sizeOverLimitRejected() {
-            assertThatThrownBy(() ->
-                    categoryService.getCategories(null, null, 1, 101))
-                    .isInstanceOf(BadRequestException.class);
-
-            verify(categoryMapper, never()).selectPage(any(), any());
-        }
-
-        @Test
         @DisplayName("categoryName 只有空白 → 視同未帶,不觸發互斥檢查,照常查詢")
         void blankNameTreatedAsAbsent() {
             when(categoryMapper.selectPage(any(), any())).thenReturn(new Page<>(1, 10));
