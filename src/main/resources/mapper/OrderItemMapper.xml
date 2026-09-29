@@ -9,7 +9,7 @@
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.order_id
         WHERE oi.user_id = #{userId}
-          AND o.status IN ('OPEN', 'FAILED')
+          AND o.status IN ('OPEN', 'CLOSED', 'FAILED')
     </select>
 
 </mapper>
