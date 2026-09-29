@@ -582,7 +582,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 2. 確認訂單未過截止時間 (`deadline`)，已過期則拒絕
 3. 查詢 `menus` 取得 `product_name` 和 `unit_price`，驗證品項存在且供應中
 4. 以 `SELECT ... FOR UPDATE` 鎖住該使用者的 `users` 那一行，序列化同一使用者的併發下單（見 7.2「併發下單的凍結不變式」）
-5. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN 及 FAILED 訂單的未結金額（必須在取得鎖之後才讀）
+5. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN、CLOSED 及 FAILED 訂單的未結金額（必須在取得鎖之後才讀）
 6. 餘額不足則拒絕
 7. 寫入 `order_items`（含品名與單價快照）
 8. 同一使用者可重複點相同品項（例如多訂幾份）
@@ -1039,7 +1039,7 @@ status=OPEN      檢查餘額                status=CLOSED       SETTLED / FAILE
 **可用餘額計算公式：**
 
 ```sql
-available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的 order_items.subtotal)
+available_balance = users.balance - SUM(OPEN、CLOSED 和 FAILED 訂單中該使用者的 order_items.subtotal)
 ```
 
 **使用場景：**
@@ -1051,7 +1051,7 @@ available_balance = users.balance - SUM(OPEN 和 FAILED 訂單中該使用者的
 | WebSocket 推送餘額更新 | 可用餘額 |
 | 查詢帳戶餘額 (`get_user_account`) | 回傳兩者 |
 
-> FAILED 訂單的金額也要凍結，因為這些訂單尚未扣款但仍可能重試結算。
+> CLOSED 與 FAILED 訂單的金額也要凍結：CLOSED 是已截止、正在扣款；FAILED 是尚未扣款但仍可能重試結算。兩者的錢都還在 `users.balance` 裡，不凍結就會被拿去別的團重複下單。
 
 **`get_user_account` 回應格式：**
 
@@ -1305,7 +1305,7 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 | Mapper | 重點驗證 |
 |--------|---------|
 | OrderMapper | `getOrderDetail` 的 JOIN 查詢回傳結構正確 |
-| OrderMapper | `getUserAvailableBalance` 計算邏輯：users.balance - OPEN 及 FAILED 訂單金額 |
+| OrderMapper | `getUserAvailableBalance` 計算邏輯：users.balance - OPEN、CLOSED 及 FAILED 訂單金額 |
 | OrderMapper | `insertOrderItems` 寫入後 subtotal (generated column) 自動計算 |
 | OrderMapper | `selectByStatus` 查詢指定狀態的訂單 (重啟恢復用) |
 | UserMapper | `casDebit` CAS 扣款：UPDATE balance WHERE balance >= amount |
