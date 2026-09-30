@@ -107,6 +107,48 @@ class OrderConcurrentSettleTest extends AbstractIntegrationTest {
         }
     }
 
+    @Test
+    @DisplayName("團主取消與結算同時發生(CLOSED)→ 不會「扣了錢但單是 CANCELLED」")
+    void cancelVsPayOnClosedOrder() throws Exception {
+        for (int round = 0; round < ROUNDS; round++) {
+            String userId = seedUser(1000);
+            String orderId = seedClosedOrderWithItem(userId);
+
+            runConcurrently(
+                    () -> orderService.cancelOrder(orderId, userId),
+                    () -> orderService.payOrder(orderId));
+
+            assertSettledXorCancelled(orderId, userId, round);
+        }
+    }
+
+    @Test
+    @DisplayName("截止結算與團主取消同時發生(OPEN)→ 不會把 CANCELLED 蓋回去再扣款")
+    void settleVsCancelOnOpenOrder() throws Exception {
+        for (int round = 0; round < ROUNDS; round++) {
+            String userId = seedUser(1000);
+            String orderId = seedOrderWithItem(userId, OrderStatus.OPEN);
+
+            runConcurrently(
+                    () -> orderService.settleOrder(orderId),
+                    () -> orderService.cancelOrder(orderId, userId));
+
+            assertSettledXorCancelled(orderId, userId, round);
+        }
+    }
+
+    /** 結果只能是兩者之一:結算成功且扣了錢,或取消成功且沒扣錢。 */
+    private void assertSettledXorCancelled(String orderId, String userId, int round) {
+        OrderStatus status = orderMapper.selectById(orderId).getStatus();
+        long balance = userMapper.selectById(userId).getBalance();
+
+        assertThat(status).as("第 %d 輪", round).isIn(OrderStatus.SETTLED, OrderStatus.CANCELLED);
+        long expected = status == OrderStatus.SETTLED ? 1000 - UNIT_PRICE : 1000;
+        assertThat(balance)
+                .as("第 %d 輪:狀態是 %s,餘額應為 %d", round, status, expected)
+                .isEqualTo(expected);
+    }
+
     // ========== helpers ==========
 
     private String seedUser(long balance) {
@@ -120,12 +162,16 @@ class OrderConcurrentSettleTest extends AbstractIntegrationTest {
     }
 
     private String seedClosedOrderWithItem(String userId) {
+        return seedOrderWithItem(userId, OrderStatus.CLOSED);
+    }
+
+    private String seedOrderWithItem(String userId, OrderStatus status) {
         Order order = new Order();
         order.setOrderId(UUID.randomUUID().toString());
         order.setStoreId("store001");
         order.setCreatedBy(userId);
         order.setOrderName("結算測試團");
-        order.setStatus(OrderStatus.CLOSED);
+        order.setStatus(status);
         order.setDeadline(LocalDateTime.now().minusMinutes(1));
         orderMapper.insert(order);
 

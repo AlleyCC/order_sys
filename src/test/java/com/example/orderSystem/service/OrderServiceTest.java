@@ -274,16 +274,32 @@ class OrderServiceTest {
         }
 
         @Test
-        @DisplayName("itemId=all → 訂單狀態改 CANCELLED")
+        @DisplayName("itemId=all → 只在 DB 仍是 OPEN 時改成 CANCELLED")
         void deleteAll() {
             Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
 
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderMapper.updateById((Order) any())).thenReturn(1);
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CANCELLED, List.of(OrderStatus.OPEN)))
+                    .thenReturn(1);
 
             orderService.deleteUserOrder(deleteReq("ord-001", "all"), "alice");
 
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+            verify(orderMapper, never()).updateById((Order) any());
+            verify(settlementQueue).remove("ord-001");
+        }
+
+        @Test
+        @DisplayName("itemId=all 但狀態已被改掉(例如剛開始結算)→ ConflictException,不移除排程")
+        void deleteAllLosesRace() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
+
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CANCELLED, List.of(OrderStatus.OPEN)))
+                    .thenReturn(0);
+
+            assertThatThrownBy(() -> orderService.deleteUserOrder(deleteReq("ord-001", "all"), "alice"))
+                    .isInstanceOf(ConflictException.class);
+            verify(settlementQueue, never()).remove(any());
         }
 
         @Test
@@ -311,20 +327,19 @@ class OrderServiceTest {
     @DisplayName("cancelOrder")
     class CancelOrder {
 
+        private static final List<OrderStatus> CANCELLABLE = List.of(OrderStatus.OPEN, OrderStatus.CLOSED);
+
         @Test
         @DisplayName("團主取消 OPEN 訂單 → 成功")
         void ownerCancelsOpen() {
             Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            List<OrderStatus> persistedStatuses = new ArrayList<>();
-            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
-                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
-                return 1;
-            });
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CANCELLED, CANCELLABLE)).thenReturn(1);
 
             orderService.cancelOrder("ord-001", "alice");
 
-            assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
+            verify(orderMapper, never()).updateById((Order) any());
+            verify(settlementQueue).remove("ord-001");
         }
 
         @Test
@@ -332,15 +347,23 @@ class OrderServiceTest {
         void ownerCancelsClosed() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            List<OrderStatus> persistedStatuses = new ArrayList<>();
-            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
-                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
-                return 1;
-            });
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CANCELLED, CANCELLABLE)).thenReturn(1);
 
             orderService.cancelOrder("ord-001", "alice");
 
-            assertThat(persistedStatuses).containsExactly(OrderStatus.CANCELLED);
+            verify(orderMapper, never()).updateById((Order) any());
+        }
+
+        @Test
+        @DisplayName("讀到 CLOSED 但寫入前已被結算 → ConflictException,不會蓋掉 SETTLED")
+        void cancelLosesRaceToSettlement() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CANCELLED, CANCELLABLE)).thenReturn(0);
+
+            assertThatThrownBy(() -> orderService.cancelOrder("ord-001", "alice"))
+                    .isInstanceOf(ConflictException.class);
+            verify(settlementQueue, never()).remove(any());
         }
 
         @Test
@@ -437,6 +460,34 @@ class OrderServiceTest {
 
             verify(paymentService).executePayment(order);
             verify(orderMapper, never()).updateById((Order) any());
+            verify(orderMapper, never()).updateStatusIfIn(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("OPEN 訂單 → 只在 DB 仍是 OPEN 時改成 CLOSED,再扣款")
+        void openOrderClosedConditionally() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CLOSED, List.of(OrderStatus.OPEN)))
+                    .thenReturn(1);
+
+            orderService.settleOrder("ord-001");
+
+            verify(orderMapper, never()).updateById((Order) any());
+            verify(paymentService).executePayment(order);
+        }
+
+        @Test
+        @DisplayName("讀到 OPEN 但寫入前已被取消 → 跳過,不會把 CANCELLED 蓋回 CLOSED、也不扣款")
+        void openOrderCancelledConcurrentlyIsSkipped() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.OPEN);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderMapper.updateStatusIfIn("ord-001", OrderStatus.CLOSED, List.of(OrderStatus.OPEN)))
+                    .thenReturn(0);
+
+            orderService.settleOrder("ord-001");
+
+            verify(paymentService, never()).executePayment(any());
         }
 
         @Test

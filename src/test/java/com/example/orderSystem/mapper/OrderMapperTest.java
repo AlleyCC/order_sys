@@ -125,6 +125,32 @@ class OrderMapperTest {
         assertThat(firstPage.getTotal()).isGreaterThanOrEqualTo(2);
     }
 
+    @Test
+    @DisplayName("條件式改狀態:DB 狀態在允許清單內才寫入,回傳 1")
+    void updateStatusIfInMatches() {
+        String owner = seedUser("cas-match");
+        seedOrder("ord-cas-1", owner, OrderStatus.CLOSED);
+
+        int affected = orderMapper.updateStatusIfIn(
+                "ord-cas-1", OrderStatus.CANCELLED, List.of(OrderStatus.OPEN, OrderStatus.CLOSED));
+
+        assertThat(affected).isEqualTo(1);
+        assertThat(orderMapper.selectById("ord-cas-1").getStatus()).isEqualTo(OrderStatus.CANCELLED);
+    }
+
+    @Test
+    @DisplayName("條件式改狀態:DB 狀態已被改掉(例如已 SETTLED)→ 不寫入,回傳 0")
+    void updateStatusIfInSkipsWhenStatusChanged() {
+        String owner = seedUser("cas-miss");
+        seedOrder("ord-cas-2", owner, OrderStatus.SETTLED);
+
+        int affected = orderMapper.updateStatusIfIn(
+                "ord-cas-2", OrderStatus.CANCELLED, List.of(OrderStatus.OPEN, OrderStatus.CLOSED));
+
+        assertThat(affected).isZero();
+        assertThat(orderMapper.selectById("ord-cas-2").getStatus()).isEqualTo(OrderStatus.SETTLED);
+    }
+
     private List<String> openOrderIds() {
         return orderMapper.getOpenOrdersWithStore(new Page<>(1, 50))
                 .getRecords().stream()

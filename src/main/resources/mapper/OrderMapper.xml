@@ -56,4 +56,14 @@
         WHERE o.order_id = #{orderId}
     </select>
 
+    <update id="updateStatusIfIn">
+        UPDATE orders
+        SET status = #{to}
+        WHERE order_id = #{orderId}
+          AND status IN
+          <foreach collection="from" item="s" open="(" separator="," close=")">
+            #{s}
+          </foreach>
+    </update>
+
 </mapper>
