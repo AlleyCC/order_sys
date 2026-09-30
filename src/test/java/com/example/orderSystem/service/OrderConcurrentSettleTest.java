@@ -87,6 +87,31 @@ class OrderConcurrentSettleTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("原認領者與接手者同時結算同一張已截止訂單(租約逾期被回收)→ 只扣一次款")
+    void concurrentSettleOrderDebitsOnce() throws Exception {
+        for (int round = 0; round < ROUNDS; round++) {
+            String userId = seedUser(1000);
+            String orderId = seedOrderWithItem(userId, OrderStatus.OPEN);
+
+            List<Throwable> errors = runConcurrently(
+                    () -> orderService.settleOrder(orderId),
+                    () -> orderService.settleOrder(orderId));
+
+            assertThat(orderMapper.selectById(orderId).getStatus()).isEqualTo(OrderStatus.SETTLED);
+            assertThat(userMapper.selectById(userId).getBalance())
+                    .as("第 %d 輪:只能扣一次 70", round)
+                    .isEqualTo(1000 - UNIT_PRICE);
+            assertThat(transactionMapper.selectCount(
+                    new LambdaQueryWrapper<Transaction>().eq(Transaction::getOrderId, orderId)))
+                    .as("第 %d 輪:交易紀錄只能有一筆", round)
+                    .isEqualTo(1);
+            assertThat(errors)
+                    .as("第 %d 輪:搶輸的一方應該安靜跳過,不拋例外(否則消費端會把它當失敗重試)", round)
+                    .isEmpty();
+        }
+    }
+
+    @Test
     @DisplayName("團主連按兩次 pay_order → 只扣一次款,另一次回 409")
     void doublePayOrderDebitsOnce() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
