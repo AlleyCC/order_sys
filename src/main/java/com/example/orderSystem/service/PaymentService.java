@@ -1,12 +1,14 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.OrderItem;
 import com.example.orderSystem.entity.Transaction;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.TradeType;
+import com.example.orderSystem.exception.ConflictException;
 import com.example.orderSystem.exception.InsufficientBalanceException;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
@@ -31,12 +33,22 @@ public class PaymentService {
     private final TransactionMapper transactionMapper;
 
     /**
-     * CAS debit all users for an order, write transactions, set SETTLED.
-     * Runs in a single DB transaction — rolls back all debits on failure.
+     * Claim the order (CLOSED/FAILED → SETTLED), then CAS debit all users and write transactions.
+     * Runs in a single DB transaction — rolls back the claim and all debits on failure.
      */
     @Transactional
     public void executePayment(Order order) {
         String orderId = order.getOrderId();
+
+        // 先搶下訂單狀態再扣款:同一張單同時被結算時(自動重試 vs 手動 pay_order),
+        // 只有 UPDATE 成功的那個能往下扣;失敗 rollback 時狀態也會一起退回。
+        int claimed = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
+                .set(Order::getStatus, OrderStatus.SETTLED)
+                .eq(Order::getOrderId, orderId)
+                .in(Order::getStatus, OrderStatus.CLOSED, OrderStatus.FAILED));
+        if (claimed == 0) {
+            throw new ConflictException("訂單狀態已變更，無法結算");
+        }
 
         // Group items by user
         List<OrderItem> items = orderItemMapper.selectList(
@@ -69,6 +81,5 @@ public class PaymentService {
         }
 
         order.setStatus(OrderStatus.SETTLED);
-        orderMapper.updateById(order);
     }
 }

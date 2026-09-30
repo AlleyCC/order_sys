@@ -45,6 +45,7 @@ public class OrderService {
     private final NotificationService notificationService;
     private final ApplicationEventPublisher eventPublisher;
     private final RbacCacheService rbacCacheService;
+    private final RoleMapper roleMapper;
 
     public IPage<Store> getAllShops(String storeName, int page, int size) {
         String name = StringUtils.hasText(storeName) ? escapeLike(storeName.trim()) : null;
@@ -261,18 +262,22 @@ public class OrderService {
     /**
      * Called by DelayQueue consumer when deadline arrives.
      * OPEN → CLOSED → attempt payOrder.
+     * CLOSED 代表上次扣款中途出錯(狀態已改、扣款已 rollback),重試時直接接著扣款。
      */
     public void settleOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
-        if (order == null || order.getStatus() != OrderStatus.OPEN) {
+        if (order == null
+                || (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.CLOSED)) {
             log.info("Skipping settlement for order {} (status: {})",
                     orderId, order != null ? order.getStatus() : "not found");
             return;
         }
 
         // OPEN → CLOSED
-        order.setStatus(OrderStatus.CLOSED);
-        orderMapper.updateById(order);
+        if (order.getStatus() == OrderStatus.OPEN) {
+            order.setStatus(OrderStatus.CLOSED);
+            orderMapper.updateById(order);
+        }
 
         // Attempt payment
         try {
@@ -282,6 +287,25 @@ public class OrderService {
         } catch (InsufficientBalanceException e) {
             log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
             notifySettlementResult(order, false);
+        } catch (ConflictException e) {
+            // 同時有人(例如團主手動 pay_order)先結算完了,這邊不用再做
+            log.info("Order {} was settled concurrently, skipping", orderId);
+        }
+    }
+
+    /**
+     * 自動重試次數用完時呼叫:訂單停在 CLOSED,通知團主與能救援訂單的管理員手動結算。
+     */
+    public void notifySettlementAbandoned(String orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            return;
+        }
+        Set<String> recipients = new LinkedHashSet<>();
+        recipients.add(order.getCreatedBy());
+        recipients.addAll(roleMapper.selectUserIdsByRoleNames(RESCUE_ROLES));
+        for (String userId : recipients) {
+            notificationService.sendSettlementAbandoned(userId, orderId, order.getOrderName());
         }
     }
 

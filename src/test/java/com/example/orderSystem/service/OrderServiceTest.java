@@ -58,6 +58,8 @@ class OrderServiceTest {
     private ApplicationEventPublisher eventPublisher;
     @Mock
     private RbacCacheService rbacCacheService;
+    @Mock
+    private RoleMapper roleMapper;
 
     // ========== helpers ==========
 
@@ -416,6 +418,69 @@ class OrderServiceTest {
 
             assertThatThrownBy(() -> orderService.payOrder("ord-001"))
                     .isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    // ========== settle (自動結算) ==========
+
+    @Nested
+    @DisplayName("settleOrder")
+    class SettleOrder {
+
+        @Test
+        @DisplayName("CLOSED 訂單(上次扣款中斷)→ 繼續扣款,不再改一次狀態")
+        void closedOrderResumesPayment() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+
+            orderService.settleOrder("ord-001");
+
+            verify(paymentService).executePayment(order);
+            verify(orderMapper, never()).updateById((Order) any());
+        }
+
+        @Test
+        @DisplayName("FAILED 訂單 → 跳過,自動結算不重試餘額不足的單")
+        void failedOrderSkipped() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.FAILED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+
+            orderService.settleOrder("ord-001");
+
+            verify(paymentService, never()).executePayment(any());
+        }
+
+        @Test
+        @DisplayName("扣款時發現已被別人結算(ConflictException)→ 視為完成,不往外丟")
+        void concurrentlySettledIsNotAnError() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            doThrow(new ConflictException("訂單狀態已變更，無法結算"))
+                    .when(paymentService).executePayment(order);
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService, never()).sendSettlementFailed(any(), any(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("notifySettlementAbandoned")
+    class NotifySettlementAbandoned {
+
+        @Test
+        @DisplayName("通知團主與管理員(客服、超級管理員),同一人只通知一次")
+        void notifiesOrganizerAndAdminsOnce() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(roleMapper.selectUserIdsByRoleNames(argThat(roles ->
+                    roles.containsAll(List.of("SUPER_ADMIN", "CUSTOMER_SERVICE")))))
+                    .thenReturn(List.of("admin", "alice"));
+
+            orderService.notifySettlementAbandoned("ord-001");
+
+            verify(notificationService).sendSettlementAbandoned("alice", "ord-001", "Test Order");
+            verify(notificationService).sendSettlementAbandoned("admin", "ord-001", "Test Order");
+            verifyNoMoreInteractions(notificationService);
         }
     }
 }

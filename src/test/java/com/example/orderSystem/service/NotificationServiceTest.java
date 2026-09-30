@@ -62,4 +62,18 @@ class NotificationServiceTest {
         assertThat(msg.getResult()).isEqualTo("FAILED");
         assertThat(msg.getDetail()).contains("餘額不足");
     }
+
+    @Test
+    @DisplayName("sendSettlementAbandoned → publish ERROR 通知,請管理員手動結算")
+    void sendSettlementAbandoned() {
+        notificationService.sendSettlementAbandoned("alice", "ord-001", "午餐團");
+
+        ArgumentCaptor<SettlementMessage> captor = ArgumentCaptor.forClass(SettlementMessage.class);
+        verify(publisher).publish(eq("alice"), eq("/queue/notification"), captor.capture());
+
+        SettlementMessage msg = captor.getValue();
+        assertThat(msg.getOrderId()).isEqualTo("ord-001");
+        assertThat(msg.getResult()).isEqualTo("ERROR");
+        assertThat(msg.getDetail()).contains("手動結算");
+    }
 }
