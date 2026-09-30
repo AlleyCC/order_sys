@@ -614,6 +614,12 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 { "status": 403, "detail": "無權限刪除此品項" }
 ```
 
+**Response 409 Conflict**（`itemId = "all"` 時，檢查通過後狀態才被改掉，例如剛好到截止時間開始結算）:
+
+```json
+{ "status": 409, "detail": "訂單狀態已變更，無法刪除" }
+```
+
 **權限規則:**
 - **客服 / 超級管理員**: 可刪除任何訂單中的任何品項(跨 ownership 的救援操作,
   依呼叫者當下的系統角色判斷,角色撤銷後下一個請求立即失效)
@@ -625,7 +631,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 **業務邏輯:**
 - 僅限訂單狀態為 OPEN 時可刪除
-- `itemId = "all"`: 訂單狀態改為 CANCELLED，同時從 DelayQueue 移除排程
+- `itemId = "all"`: 以條件式寫入 `UPDATE orders SET status = 'CANCELLED' WHERE order_id = ? AND status = 'OPEN'` 改為 CANCELLED，成功才從 DelayQueue 移除排程；`affected_rows = 0` 回 409（見 7.3「訂單狀態一律條件式寫入」）
 - `itemId = <id>`: 刪除單筆 `order_items`
 - 透過 WebSocket 推送當事人的可用餘額更新
 
@@ -648,18 +654,19 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 { "message": "訂單已取消" }
 ```
 
-**Response 403 / 400:**
+**Response 403 / 400 / 409:**
 
 ```json
 { "status": 403, "detail": "僅開團者、客服或超級管理員可取消訂單" }
 { "status": 400, "detail": "僅 OPEN 或 CLOSED 狀態的訂單可取消" }
+{ "status": 409, "detail": "訂單狀態已變更，無法取消" }
 ```
 
 **業務邏輯:**
 1. 確認當前用戶為開團者或 admin
 2. 確認訂單狀態為 OPEN 或 CLOSED
-3. 更新狀態 → CANCELLED
-4. 若狀態為 OPEN，從 DelayQueue 移除排程任務
+3. 條件式更新狀態 → CANCELLED：`UPDATE orders SET status = 'CANCELLED' WHERE order_id = ? AND status IN ('OPEN', 'CLOSED')`。`affected_rows = 0` 代表第 2 步之後狀態已被改掉（例如同時結算成功），回 409，不可把 SETTLED 蓋成 CANCELLED
+4. 從 DelayQueue 移除排程任務
 5. 透過 WebSocket 通知同訂單所有用戶
 
 ---
@@ -1093,7 +1100,8 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 1. 建單時：將 (orderId, deadline) 放入 DelayQueue
 2. 背景執行緒阻塞等待 DelayQueue
 3. Deadline 到達，任務彈出：
-   a. 更新訂單狀態 OPEN → CLOSED（若已是 CLOSED，代表上次扣款中斷，直接進入 b）
+   a. 條件式更新訂單狀態 OPEN → CLOSED（若已是 CLOSED，代表上次扣款中斷，直接進入 b）
+      affected_rows = 0 → 團主剛取消，本次結束，不扣款
    b. 搶下訂單狀態：UPDATE orders SET status='SETTLED' WHERE order_id=? AND status IN ('CLOSED','FAILED')
       affected_rows = 0 → 別人已先結算，本次結束
    c. 按 user_id 分組加總 order_items.subtotal
@@ -1119,6 +1127,25 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 #### 同一張單只能扣一次
 
 自動重試與團主手動 pay_order 可能同時結算同一張單。若只是「先讀狀態、再決定扣不扣」，兩邊都會讀到 CLOSED 而各扣一次。因此扣款交易的第一步是條件式 UPDATE 搶下訂單狀態（3b），和餘額的 CAS 是同一個概念：只有 `affected_rows = 1` 的那個請求能往下扣款；另一個拿到 0，pay_order 回 409，自動結算則視為已完成。扣款失敗 rollback 時，搶下的狀態也一起退回。
+
+#### 訂單狀態一律條件式寫入
+
+同樣的問題不只發生在扣款。凡是「先讀狀態、判斷、再用 `updateById` 整筆覆寫」的寫法，讀與寫之間狀態都可能被別的請求改掉，覆寫就會蓋掉對方的結果。例如團主讀到 CLOSED 準備取消，這時結算成功變成 SETTLED，取消又把它蓋成 CANCELLED —— 錢扣了、單卻被取消。
+
+因此訂單狀態的轉換一律透過 `OrderMapper.updateStatusIfIn(orderId, 新狀態, 允許的舊狀態)`：
+
+```sql
+UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
+```
+
+| 轉換 | 允許的舊狀態 | affected_rows = 0 時 |
+|------|------------|--------------------|
+| 截止結算 OPEN → CLOSED | OPEN | 跳過，不扣款 |
+| 扣款搶狀態 → SETTLED | CLOSED、FAILED | pay_order 回 409；自動結算視為已完成 |
+| 取消訂單 → CANCELLED | OPEN、CLOSED | 回 409 |
+| delete_user_order itemId="all" → CANCELLED | OPEN | 回 409 |
+
+先讀出來的狀態只用來回傳較友善的錯誤訊息（例如 400「訂單尚未截止」），真正能不能寫入由 DB 在 UPDATE 當下決定。
 
 ### 7.4 WebSocket 即時通訊
 
@@ -1264,6 +1291,16 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 | itemId="all"，開團者刪除整筆訂單 | 200，狀態 → CANCELLED，DelayQueue 任務移除 |
 | itemId="all"，非開團者且無客服/超管角色 | 403 |
 | 訂單非 OPEN 狀態時刪除 | 400 |
+| itemId="all"，檢查後狀態被結算改掉 | 409，不移除排程 |
+
+#### cancel_order
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 團主取消 OPEN / CLOSED 訂單 | 200，狀態 → CANCELLED，排程移除 |
+| 讀到 CLOSED 後，寫入前已被結算 | 409，狀態維持 SETTLED |
+| 取消與扣款同時發生 | 結果只能是「SETTLED 且已扣款」或「CANCELLED 且未扣款」 |
+| 截止結算與取消同時發生（OPEN） | 同上，結算不可把 CANCELLED 蓋回 CLOSED |
 
 #### get_order_detail
 

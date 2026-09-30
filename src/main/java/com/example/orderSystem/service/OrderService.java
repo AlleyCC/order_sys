@@ -216,8 +216,11 @@ public class OrderService {
             if (!order.getCreatedBy().equals(userId) && !canRescue(userId)) {
                 throw new ForbiddenException("無權限刪除此訂單");
             }
-            order.setStatus(OrderStatus.CANCELLED);
-            orderMapper.updateById(order);
+            // 條件式寫入:讀到 OPEN 之後,截止結算可能已經把狀態改掉了
+            if (orderMapper.updateStatusIfIn(order.getOrderId(), OrderStatus.CANCELLED,
+                    List.of(OrderStatus.OPEN)) == 0) {
+                throw new ConflictException("訂單狀態已變更，無法刪除");
+            }
             settlementQueue.remove(order.getOrderId());
         } else {
             // Delete single item
@@ -254,8 +257,11 @@ public class OrderService {
             throw new IllegalStateException("僅 OPEN 或 CLOSED 狀態的訂單可取消");
         }
 
-        order.setStatus(OrderStatus.CANCELLED);
-        orderMapper.updateById(order);
+        // 條件式寫入:讀到 CLOSED 之後可能已被結算,不能把 SETTLED 蓋成 CANCELLED
+        if (orderMapper.updateStatusIfIn(orderId, OrderStatus.CANCELLED,
+                List.of(OrderStatus.OPEN, OrderStatus.CLOSED)) == 0) {
+            throw new ConflictException("訂單狀態已變更，無法取消");
+        }
         settlementQueue.remove(orderId);
     }
 
@@ -273,10 +279,13 @@ public class OrderService {
             return;
         }
 
-        // OPEN → CLOSED
+        // OPEN → CLOSED(條件式寫入:讀到 OPEN 之後團主可能剛取消,不能把 CANCELLED 蓋回來)
         if (order.getStatus() == OrderStatus.OPEN) {
+            if (orderMapper.updateStatusIfIn(orderId, OrderStatus.CLOSED, List.of(OrderStatus.OPEN)) == 0) {
+                log.info("Order {} changed status before closing, skipping settlement", orderId);
+                return;
+            }
             order.setStatus(OrderStatus.CLOSED);
-            orderMapper.updateById(order);
         }
 
         // Attempt payment
