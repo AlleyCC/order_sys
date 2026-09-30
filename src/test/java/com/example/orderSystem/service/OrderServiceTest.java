@@ -15,6 +15,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -532,6 +534,18 @@ class OrderServiceTest {
             verify(notificationService).sendSettlementAbandoned("alice", "ord-001", "Test Order");
             verify(notificationService).sendSettlementAbandoned("admin", "ord-001", "Test Order");
             verifyNoMoreInteractions(notificationService);
+        }
+
+        @ParameterizedTest
+        @EnumSource(value = OrderStatus.class, names = {"SETTLED", "FAILED", "CANCELLED"})
+        @DisplayName("訂單已到終態(例如結算成功後、ack 前機器當掉又被回收放棄)→ 不發「系統結算失敗」通知")
+        void skipsWhenOrderAlreadyFinished(OrderStatus status) {
+            Order order = createOrder("ord-001", "alice", status);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+
+            orderService.notifySettlementAbandoned("ord-001");
+
+            verifyNoInteractions(notificationService);
         }
     }
 }

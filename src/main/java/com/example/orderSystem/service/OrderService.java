@@ -303,11 +303,13 @@ public class OrderService {
     }
 
     /**
-     * 自動重試次數用完時呼叫:訂單停在 CLOSED,通知團主與能救援訂單的管理員手動結算。
+     * 自動重試次數用完時呼叫:訂單停在 OPEN 或 CLOSED,通知團主與能救援訂單的管理員手動結算。
+     * 訂單若已到終態(例如結算成功後、確認前機器當掉,又被回收到次數用完),就不需要人工處理。
      */
     public void notifySettlementAbandoned(String orderId) {
         Order order = orderMapper.selectById(orderId);
-        if (order == null) {
+        if (order == null
+                || (order.getStatus() != OrderStatus.OPEN && order.getStatus() != OrderStatus.CLOSED)) {
             return;
         }
         Set<String> recipients = new LinkedHashSet<>();
