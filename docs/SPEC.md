@@ -666,7 +666,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 #### POST `/order/pay_order`
 
-手動結算訂單（用於 FAILED 狀態重試）。正常流程由 DelayQueue 自動觸發結算。
+手動結算訂單（用於 FAILED 狀態重試，或自動重試次數用完、停在 CLOSED 的訂單）。正常流程由 DelayQueue 自動觸發結算。
 
 **Request:**
 
@@ -686,17 +686,19 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 ```json
 { "status": 404, "detail": "訂單不存在" }
 { "status": 409, "detail": "該訂單已結算，無法進行付款" }
+{ "status": 409, "detail": "訂單狀態已變更，無法結算" }
 { "status": 400, "detail": "alice 餘額不足" }
 ```
 
 **業務邏輯 (��用 `@Transactional`):**
 1. 確認訂單存在且狀態為 CLOSED 或 FAILED（SETTLED 回傳 409，OPEN 回傳 400）
-2. 依 `order_items` 按 `user_id` 分組，加總每人 `subtotal`
-3. 逐一對每位使用者執行 CAS 扣款：`UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?`
-4. `affected_rows = 1` → 扣款成功，讀取新 balance，寫入 `transactions` (type='DEBIT')
-5. `affected_rows = 0` → 餘額不足，狀態更新為 FAILED，rollback 所有扣款
-6. 全部成功 → 狀態更新��� SETTLED
-7. 透過 WebSocket 推送扣款結果通知 (`/user/queue/notification`) 及餘額更新 (`/user/queue/balance`) 給相關用戶
+2. 搶下訂單狀態：`UPDATE orders SET status = 'SETTLED' WHERE order_id = ? AND status IN ('CLOSED', 'FAILED')`。`affected_rows = 0` 代表同時有別的請求先結算了（或訂單已被取消），回傳 409 且不扣任何人（見 7.3「同一張單只能扣一次」）
+3. 依 `order_items` 按 `user_id` 分組，加總每人 `subtotal`
+4. 逐一對每位使用者執行 CAS 扣款：`UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?`
+5. `affected_rows = 1` → 扣款成功，讀取新 balance，寫入 `transactions` (type='DEBIT')
+6. `affected_rows = 0` → 餘額不足，rollback 所有扣款（第 2 步搶下的狀態也一起退回），再於交易外把狀態更新為 FAILED
+7. 全部成功 → commit，狀態即為第 2 步寫入的 SETTLED
+8. 透過 WebSocket 推送扣款結果通知 (`/user/queue/notification`) 及餘額更新 (`/user/queue/balance`) 給相關用戶
 
 ---
 
@@ -873,7 +875,7 @@ OPEN ──→ CLOSED ──→ SETTLED
 |------|---------|
 | OPEN → CLOSED | DelayQueue 在 deadline 到達時自動觸發 |
 | OPEN → CANCELLED | 團主呼叫取消訂單 API 或 delete_user_order itemId="all" |
-| CLOSED → SETTLED | 自動結算（DelayQueue 觸發 CLOSED 後立即嘗試扣款） |
+| CLOSED → SETTLED | 自動結算（DelayQueue 觸發 CLOSED 後立即嘗試扣款）；扣款途中發生餘額不足以外的錯誤時停在 CLOSED，由自動重試接續（見 7.3），重試用完則由管理員手動呼叫 pay_order |
 | CLOSED → FAILED | 自動結算時有使用者餘額不足 |
 | CLOSED → CANCELLED | 團主截止後仍可取消訂單 |
 | FAILED → SETTLED | 手動呼叫 pay_order API 重試 |
@@ -1091,15 +1093,32 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 1. 建單時：將 (orderId, deadline) 放入 DelayQueue
 2. 背景執行緒阻塞等待 DelayQueue
 3. Deadline 到達，任務彈出：
-   a. 更新訂單狀態 OPEN → CLOSED
-   b. 按 user_id 分組加總 order_items.subtotal
-   c. 逐一對每位使用者執行 CAS 扣款：UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?
-   d. affected_rows = 1 → 成功，讀取新 balance，寫入 transactions (type='DEBIT')
-   e. 全部成功 → 狀態 → SETTLED
-   f. 任一 affected_rows = 0 → 餘額不足，狀態 → FAILED，rollback 所有扣款
+   a. 更新訂單狀態 OPEN → CLOSED（若已是 CLOSED，代表上次扣款中斷，直接進入 b）
+   b. 搶下訂單狀態：UPDATE orders SET status='SETTLED' WHERE order_id=? AND status IN ('CLOSED','FAILED')
+      affected_rows = 0 → 別人已先結算，本次結束
+   c. 按 user_id 分組加總 order_items.subtotal
+   d. 逐一對每位使用者執行 CAS 扣款：UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?
+   e. affected_rows = 1 → 成功，讀取新 balance，寫入 transactions (type='DEBIT')
+   f. 全部成功 → commit，狀態 = SETTLED
+   g. 任一 affected_rows = 0 → 餘額不足，rollback 所有扣款，狀態 → FAILED
 4. 透過 WebSocket 推送結算結果給所有相關用戶
 5. 應用重啟時：從 DB 撈 status=OPEN 的訂單，重新放入 DelayQueue
 ```
+
+#### 結算重試
+
+步驟 3 若發生餘額不足以外的錯誤（例如 DB 連線中斷），扣款交易 rollback，但 3a 的 CLOSED 已寫入，訂單會停在 CLOSED。排程會把訂單重新排入佇列，再跑一次步驟 3，並從 3b 接著扣款：
+
+| 項目 | 規則 |
+|------|------|
+| 重試間隔 | 依序 1、2、4、8、16 秒（每次加倍） |
+| 重試上限 | 5 次；次數記在 Redis hash `order:settlement:retries`，結算正常結束即清除 |
+| 用完之後 | 不再自動重試，訂單停在 CLOSED（金額仍凍結），通知團主與 `SUPER_ADMIN`、`CUSTOMER_SERVICE` 角色的使用者（同一人只通知一次），由管理員手動呼叫 pay_order |
+| 不重試的情況 | 餘額不足造成的 FAILED 不自動重試，只能手動 pay_order |
+
+#### 同一張單只能扣一次
+
+自動重試與團主手動 pay_order 可能同時結算同一張單。若只是「先讀狀態、再決定扣不扣」，兩邊都會讀到 CLOSED 而各扣一次。因此扣款交易的第一步是條件式 UPDATE 搶下訂單狀態（3b），和餘額的 CAS 是同一個概念：只有 `affected_rows = 1` 的那個請求能往下扣款；另一個拿到 0，pay_order 回 409，自動結算則視為已完成。扣款失敗 rollback 時，搶下的狀態也一起退回。
 
 ### 7.4 WebSocket 即時通訊
 
@@ -1147,6 +1166,18 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
   "orderName": "下午茶飲料團",
   "result": "FAILED",
   "detail": "餘額不足，請儲值後聯繫團主重新結算"
+}
+```
+
+**自動重試用完通知**（推送給團主與管理員）：
+
+```json
+{
+  "type": "SETTLEMENT",
+  "orderId": "ord-002",
+  "orderName": "下午茶飲料團",
+  "result": "ERROR",
+  "detail": "系統結算失敗，已停止自動重試，請由管理員手動結算"
 }
 ```
 
@@ -1256,6 +1287,8 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 | 訂單內無品項 | 400 |
 | 扣款後驗證 users.balance 正確 | balance = 原餘額 - SUM(subtotal) |
 | 扣款後驗證訂單狀態 = SETTLED | status = 'SETTLED' |
+| 同一張 CLOSED 訂單同時送兩次 pay_order | 只扣一次款，另一次 409 |
+| 自動重試與手動 pay_order 同時結算 | 只扣一次款，交易紀錄只有一筆 |
 
 ### 8.4 使用者模組測試
 
@@ -1287,6 +1320,10 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 | 刪除訂單後，任務從 DelayQueue 移除 | 不再觸發結算 |
 | 應用重啟後恢復 | DB 中 status=OPEN 的訂單重新放入 DelayQueue |
 | 應用重啟後，已過期的 OPEN 訂單 | 立即觸發結算 |
+| 結算拋出非餘額不足的例外 | 重新入隊，間隔依序 1、2、4、8、16 秒 |
+| 訂單停在 CLOSED 時再次結算 | 從扣款步驟接續，狀態 → SETTLED |
+| 重試滿 5 次仍失敗 | 不再入隊，通知團主與管理員 |
+| 結算正常結束 | 清除重試次數 |
 
 ### 8.6 WebSocket 測試
 
@@ -1296,6 +1333,7 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 | 用戶刪除品項後收到餘額更新 | `/user/queue/balance` 收到 BALANCE_UPDATED，餘額回升 |
 | 扣款成功後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=SETTLED) |
 | 扣款失敗後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=FAILED) |
+| 自動重試用完後通知 | 團主與管理員的 `/user/queue/notification` 收到 SETTLEMENT (result=ERROR) |
 | 其他用戶下單不會收到通知 | 非當事人不收到 BALANCE_UPDATED |
 | 聊天訊息發送與接收 | `/topic/order/{orderId}/chat` 收到 CHAT |
 | 未認證的 WebSocket 連線 | 拒絕連線 |
