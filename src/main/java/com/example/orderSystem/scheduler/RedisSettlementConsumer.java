@@ -28,10 +28,13 @@ public class RedisSettlementConsumer {
                 log.info("Deadline reached for order {}, starting settlement", orderId);
                 try {
                     orderService.settleOrder(orderId);
+                    settlementQueue.clearRetries(orderId);
                 } catch (Exception e) {
                     log.error("Settlement failed for order {}, re-enqueuing", orderId, e);
-                    // Re-enqueue with score=now so it retries on next poll
-                    settlementQueue.reEnqueue(orderId);
+                    // 間隔逐次拉長;次數用完就停止自動重試,通知團主與管理員手動處理
+                    if (!settlementQueue.reEnqueue(orderId)) {
+                        orderService.notifySettlementAbandoned(orderId);
+                    }
                 }
             }
         }

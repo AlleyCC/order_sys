@@ -36,4 +36,14 @@ public class NotificationService {
                         .detail("餘額不足，請儲值後聯繫團主重新結算")
                         .build());
     }
+
+    public void sendSettlementAbandoned(String userId, String orderId, String orderName) {
+        publisher.publish(userId, "/queue/notification",
+                SettlementMessage.builder()
+                        .orderId(orderId)
+                        .orderName(orderName)
+                        .result("ERROR")
+                        .detail("系統結算失敗，已停止自動重試，請由管理員手動結算")
+                        .build());
+    }
 }

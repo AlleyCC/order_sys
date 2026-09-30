@@ -110,6 +110,34 @@ class RbacMapperTest {
         assertThat(names).isEmpty();
     }
 
+    // ---- selectUserIdsByRoleNames ----
+
+    @Test
+    @DisplayName("依角色查使用者:擁有任一角色就回傳,同時有兩個角色的人只出現一次")
+    void selectUserIds_anyRoleDistinct() {
+        grantRole("alice", roleIdOf("CUSTOMER_SERVICE"));
+        grantRole("admin", roleIdOf("CUSTOMER_SERVICE"));   // admin 已是 SUPER_ADMIN
+
+        List<String> ids = roleMapper.selectUserIdsByRoleNames(List.of("SUPER_ADMIN", "CUSTOMER_SERVICE"));
+
+        assertThat(ids).contains("admin", "alice").doesNotHaveDuplicates();
+        assertThat(ids).doesNotContain("bob");
+    }
+
+    @Test
+    @DisplayName("依角色查使用者:停用中的角色(status=0)不算")
+    void selectUserIds_excludesDisabledRole() {
+        Role disabled = new Role();
+        disabled.setName("SUSPENDED_RESCUE");
+        disabled.setStatus(0);
+        roleMapper.insert(disabled);
+        grantRole("bob", disabled.getRoleId());
+
+        List<String> ids = roleMapper.selectUserIdsByRoleNames(List.of("SUSPENDED_RESCUE"));
+
+        assertThat(ids).isEmpty();
+    }
+
     // ---- selectResourcesByRoleName ----
 
     @Test

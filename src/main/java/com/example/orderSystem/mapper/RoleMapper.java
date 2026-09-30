@@ -6,6 +6,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.util.Collection;
 import java.util.List;
 
 @Mapper
@@ -23,4 +24,21 @@ public interface RoleMapper extends BaseMapper<Role> {
               AND r.status = 1
             """)
     List<String> selectRoleNamesByUserId(@Param("userId") String userId);
+
+    /**
+     * 查擁有任一指定角色(且角色啟用中)的使用者 ID,去重。
+     */
+    @Select("""
+            <script>
+            SELECT DISTINCT ur.user_id
+            FROM user_roles ur
+            JOIN roles r ON r.role_id = ur.role_id
+            WHERE r.status = 1
+              AND r.name IN
+              <foreach collection="roleNames" item="name" open="(" separator="," close=")">
+                #{name}
+              </foreach>
+            </script>
+            """)
+    List<String> selectUserIdsByRoleNames(@Param("roleNames") Collection<String> roleNames);
 }

@@ -102,11 +102,52 @@ class RedisSettlementQueueTest {
     }
 
     @Test
-    @DisplayName("reEnqueue 後能被再次 poll 到")
+    @DisplayName("reEnqueue 後要等退避時間到才能被再次 poll 到(第 1 次等 1 秒)")
     void reEnqueue() {
-        settlementQueue.reEnqueue("ord-retry");
+        long before = System.currentTimeMillis();
+        assertThat(settlementQueue.reEnqueue("ord-retry")).isTrue();
 
-        Set<String> due = settlementQueue.pollDueOrders(System.currentTimeMillis());
-        assertThat(due).contains("ord-retry");
+        assertThat(settlementQueue.pollDueOrders(before)).doesNotContain("ord-retry");
+        assertThat(settlementQueue.pollDueOrders(before + 1_000 + 500)).contains("ord-retry");
+    }
+
+    @Test
+    @DisplayName("reEnqueue 間隔依序 1、2、4、8、16 秒")
+    void reEnqueueBacksOffExponentially() {
+        long[] expectedDelays = {1_000, 2_000, 4_000, 8_000, 16_000};
+
+        for (long delay : expectedDelays) {
+            long before = System.currentTimeMillis();
+            assertThat(settlementQueue.reEnqueue("ord-backoff")).isTrue();
+
+            Double score = redisTemplate.opsForZSet().score("order:settlement:queue", "ord-backoff");
+            assertThat(score.longValue()).isBetween(before + delay, System.currentTimeMillis() + delay);
+        }
+    }
+
+    @Test
+    @DisplayName("重試滿 5 次後,第 6 次 reEnqueue 回傳 false 且不再入隊")
+    void reEnqueueGivesUpAfterFiveRetries() {
+        for (int i = 0; i < 5; i++) {
+            assertThat(settlementQueue.reEnqueue("ord-giveup")).isTrue();
+        }
+        settlementQueue.remove("ord-giveup");
+
+        assertThat(settlementQueue.reEnqueue("ord-giveup")).isFalse();
+        assertThat(redisTemplate.opsForZSet().score("order:settlement:queue", "ord-giveup")).isNull();
+    }
+
+    @Test
+    @DisplayName("clearRetries 後重試次數歸零,下一次 reEnqueue 又從 1 秒開始")
+    void clearRetriesResetsBackoff() {
+        settlementQueue.reEnqueue("ord-clear");
+        settlementQueue.reEnqueue("ord-clear");
+
+        settlementQueue.clearRetries("ord-clear");
+
+        long before = System.currentTimeMillis();
+        settlementQueue.reEnqueue("ord-clear");
+        Double score = redisTemplate.opsForZSet().score("order:settlement:queue", "ord-clear");
+        assertThat(score.longValue()).isBetween(before + 1_000, System.currentTimeMillis() + 1_000);
     }
 }

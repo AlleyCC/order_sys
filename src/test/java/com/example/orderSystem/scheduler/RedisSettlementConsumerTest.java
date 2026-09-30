@@ -79,6 +79,43 @@ class RedisSettlementConsumerTest {
     }
 
     @Test
+    @DisplayName("settleOrder 拋例外且還有重試次數 → 不通知放棄")
+    void settleFailsWithRetriesLeftDoesNotNotify() {
+        when(settlementQueue.pollDueOrders(anyLong())).thenReturn(Set.of("ord-fail"));
+        when(settlementQueue.remove("ord-fail")).thenReturn(true);
+        doThrow(new RuntimeException("DB error")).when(orderService).settleOrder("ord-fail");
+        when(settlementQueue.reEnqueue("ord-fail")).thenReturn(true);
+
+        consumer.pollAndSettle();
+
+        verify(orderService, never()).notifySettlementAbandoned(any());
+    }
+
+    @Test
+    @DisplayName("settleOrder 拋例外且重試次數用完 → 通知放棄結算")
+    void settleFailsWithoutRetriesLeftNotifiesAbandoned() {
+        when(settlementQueue.pollDueOrders(anyLong())).thenReturn(Set.of("ord-fail"));
+        when(settlementQueue.remove("ord-fail")).thenReturn(true);
+        doThrow(new RuntimeException("DB error")).when(orderService).settleOrder("ord-fail");
+        when(settlementQueue.reEnqueue("ord-fail")).thenReturn(false);
+
+        consumer.pollAndSettle();
+
+        verify(orderService).notifySettlementAbandoned("ord-fail");
+    }
+
+    @Test
+    @DisplayName("settleOrder 正常結束 → 清掉重試次數")
+    void settleSucceedsClearsRetries() {
+        when(settlementQueue.pollDueOrders(anyLong())).thenReturn(Set.of("ord-ok"));
+        when(settlementQueue.remove("ord-ok")).thenReturn(true);
+
+        consumer.pollAndSettle();
+
+        verify(settlementQueue).clearRetries("ord-ok");
+    }
+
+    @Test
     @DisplayName("settleOrder 拋例外 → 不影響後續訂單處理")
     void failureDoesNotBlockOthers() {
         Set<String> dueOrders = new LinkedHashSet<>();
