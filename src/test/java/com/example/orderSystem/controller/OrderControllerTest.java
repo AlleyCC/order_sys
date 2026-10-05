@@ -29,7 +29,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.MediaType;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -37,6 +36,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import static com.example.orderSystem.support.TestFixtures.insertItem;
+import static com.example.orderSystem.support.TestFixtures.insertOrder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -135,27 +136,12 @@ class OrderControllerTest extends AbstractIntegrationTest {
     }
 
     private String seedOpenOrder(String createdBy) {
-        Order order = new Order();
-        order.setOrderId(RESCUE_PREFIX + UUID.randomUUID().toString().substring(0, 8));
-        order.setStoreId("store001");
-        order.setCreatedBy(createdBy);
-        order.setOrderName("救援情境測試團");
-        order.setStatus(OrderStatus.OPEN);
-        order.setDeadline(LocalDateTime.now().plusHours(1));
-        orderMapper.insert(order);
-        return order.getOrderId();
+        return insertOrder(orderMapper, RESCUE_PREFIX + UUID.randomUUID().toString().substring(0, 8),
+                createdBy, OrderStatus.OPEN);
     }
 
     private Integer seedItem(String orderId, String userId) {
-        OrderItem item = new OrderItem();
-        item.setOrderId(orderId);
-        item.setUserId(userId);
-        item.setMenuId(1);
-        item.setProductName("救援情境品項");
-        item.setUnitPrice(50);
-        item.setQuantity(1);
-        orderItemMapper.insert(item);
-        return item.getItemId();
+        return insertItem(orderItemMapper, orderId, userId, 50);
     }
 
     // ========== GET /order/get_all_shops ==========
