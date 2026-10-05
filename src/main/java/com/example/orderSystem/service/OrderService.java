@@ -237,11 +237,10 @@ public class OrderService {
             }
             orderItemMapper.deleteById(itemId);
 
-            // Notify balance update to the item owner
-            String itemOwner = item.getUserId();
-            Map<String, Object> updatedAccount = getUserAccount(itemOwner);
-            long updatedAvailable = (long) updatedAccount.get("availableBalance");
-            notificationService.sendBalanceUpdate(itemOwner, updatedAvailable, "刪除品項：" + item.getProductName());
+            // 通知品項主人(不一定是執行刪除的人)。這裡沒有交易、刪除已經 commit,
+            // 交給 BalanceChangeNotifier 立即處理,推播失敗才不會讓已成功的刪除回錯誤
+            eventPublisher.publishEvent(new BalanceChangedEvent(item.getUserId(),
+                    "刪除品項：" + item.getProductName()));
         }
     }
 
@@ -320,20 +319,36 @@ public class OrderService {
         }
     }
 
+    /**
+     * 結算結果已經寫進 DB 之後才呼叫,所以這裡的任何失敗都不能往外丟:
+     * 往外丟會被 consumer 當成結算失敗重排,重跑時訂單已是 SETTLED / FAILED 而直接跳過,通知照樣送不出去。
+     */
     private void notifySettlementResult(Order order, boolean success) {
-        List<OrderItem> items = orderItemMapper.selectList(
-                new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()));
-        Map<String, Long> userTotals = items.stream()
-                .collect(Collectors.groupingBy(
-                        OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
+        Map<String, Long> userTotals;
+        try {
+            List<OrderItem> items = orderItemMapper.selectList(
+                    new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()));
+            userTotals = items.stream()
+                    .collect(Collectors.groupingBy(
+                            OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
+        } catch (Exception e) {
+            log.error("Failed to load participants for settlement notification, order={}", order.getOrderId(), e);
+            return;
+        }
 
         for (String userId : userTotals.keySet()) {
-            if (success) {
-                User user = userMapper.selectById(userId);
-                notificationService.sendSettlementSuccess(userId, order.getOrderId(),
-                        order.getOrderName(), userTotals.get(userId).intValue(), user.getBalance());
-            } else {
-                notificationService.sendSettlementFailed(userId, order.getOrderId(), order.getOrderName());
+            try {
+                if (success) {
+                    User user = userMapper.selectById(userId);
+                    notificationService.sendSettlementSuccess(userId, order.getOrderId(),
+                            order.getOrderName(), userTotals.get(userId).intValue(), user.getBalance());
+                } else {
+                    notificationService.sendSettlementFailed(userId, order.getOrderId(), order.getOrderName());
+                }
+            } catch (Exception e) {
+                // 一個人失敗不影響其他人
+                log.error("Failed to notify settlement result for user={}, order={}",
+                        userId, order.getOrderId(), e);
             }
         }
     }
