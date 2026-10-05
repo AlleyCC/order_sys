@@ -7,6 +7,7 @@ import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.TradeType;
+import com.example.orderSystem.event.BalanceChangedEvent;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
 import com.example.orderSystem.scheduler.RedisSettlementQueue;
@@ -21,6 +22,8 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -235,12 +238,12 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
-            when(userMapper.selectById("alice")).thenReturn(createUser("alice", 5000L));
-            when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "alice"))
                     .doesNotThrowAnyException();
+            verify(eventPublisher).publishEvent(
+                    new BalanceChangedEvent("alice", "刪除品項：" + item.getProductName()));
         }
 
         @Test
@@ -267,12 +270,13 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
-            when(userMapper.selectById("charlie")).thenReturn(createUser("charlie", 3000L));
-            when(orderItemMapper.getFrozenAmount("charlie")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "rescuer"))
                     .doesNotThrowAnyException();
+            // 餘額變動通知的是品項主人,不是執行刪除的救援者
+            verify(eventPublisher).publishEvent(
+                    new BalanceChangedEvent("charlie", "刪除品項：" + item.getProductName()));
         }
 
         @Test
@@ -513,6 +517,55 @@ class OrderServiceTest {
 
             assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
             verify(notificationService, never()).sendSettlementFailed(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("扣款已 commit、推播失敗 → 不往外丟(否則被當成結算失敗重排),也不中斷其他人的通知")
+        void successNotificationFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderItemMapper.selectList(any())).thenReturn(List.of(
+                    createOrderItem(1, "ord-001", "alice", 70),
+                    createOrderItem(2, "ord-001", "bob", 50)));
+            when(userMapper.selectById(anyString())).thenAnswer(inv -> createUser(inv.getArgument(0), 1000));
+            // 第一則推播失敗、第二則成功;不管 HashMap 先走到誰,兩個人都要被嘗試通知
+            doThrow(new RedisConnectionFailureException("Redis 斷線"))
+                    .doNothing()
+                    .when(notificationService).sendSettlementSuccess(any(), any(), any(), anyInt(), anyLong());
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService, times(2))
+                    .sendSettlementSuccess(any(), eq("ord-001"), any(), anyInt(), anyLong());
+        }
+
+        @Test
+        @DisplayName("餘額不足已標記 FAILED、推播失敗 → 同樣不往外丟,也不中斷其他人的通知")
+        void failedNotificationFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            doThrow(new InsufficientBalanceException("bob 餘額不足"))
+                    .when(paymentService).executePayment(order);
+            when(orderItemMapper.selectList(any())).thenReturn(List.of(
+                    createOrderItem(1, "ord-001", "alice", 70),
+                    createOrderItem(2, "ord-001", "bob", 50)));
+            doThrow(new RedisConnectionFailureException("Redis 斷線"))
+                    .doNothing()
+                    .when(notificationService).sendSettlementFailed(any(), any(), any());
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService, times(2)).sendSettlementFailed(any(), eq("ord-001"), any());
+        }
+
+        @Test
+        @DisplayName("扣款已 commit、查詢要通知誰時 DB 出錯 → 一樣不往外丟")
+        void participantLookupFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderItemMapper.selectList(any()))
+                    .thenThrow(new DataAccessResourceFailureException("DB 斷線"));
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(paymentService).executePayment(order);
         }
     }
 

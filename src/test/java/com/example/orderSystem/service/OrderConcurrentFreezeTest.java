@@ -1,9 +1,6 @@
 package com.example.orderSystem.service;
 
 import com.example.orderSystem.dto.request.CreateOrderItemRequest;
-import com.example.orderSystem.entity.Order;
-import com.example.orderSystem.entity.User;
-import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.exception.InsufficientBalanceException;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
@@ -13,14 +10,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.example.orderSystem.support.TestFixtures.seedOpenOrder;
+import static com.example.orderSystem.support.TestFixtures.seedUser;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -51,8 +48,8 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     @DisplayName("餘額只夠一筆:併發下兩筆同一張單 → 只能成功一筆,凍結不超過餘額")
     void onlyOneSucceedsWhenBalanceCoversOne() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
-            String userId = seedUser(100);                 // 100 夠一筆 70,不夠兩筆 140
-            String orderId = seedOrder(userId);
+            String userId = seedUser(userMapper, "race", 100);  // 100 夠一筆 70,不夠兩筆 140
+            String orderId = seedOpenOrder(orderMapper, userId, "併發測試團");
 
             Result r = runConcurrently(userId, orderId, orderId);
 
@@ -71,8 +68,8 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     @DisplayName("餘額夠兩筆:併發下兩筆 → 兩筆都要成功(不可誤殺)")
     void bothSucceedWhenBalanceCoversBoth() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
-            String userId = seedUser(200);                 // 200 夠兩筆 70
-            String orderId = seedOrder(userId);
+            String userId = seedUser(userMapper, "race", 200);  // 200 夠兩筆 70
+            String orderId = seedOpenOrder(orderMapper, userId, "併發測試團");
 
             Result r = runConcurrently(userId, orderId, orderId);
 
@@ -87,9 +84,9 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     @DisplayName("跨訂單:同一人同時在兩張不同的團下單 → 凍結一樣不得超過餘額")
     void invariantHoldsAcrossDifferentOrders() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
-            String userId = seedUser(100);
-            String orderA = seedOrder(userId);
-            String orderB = seedOrder(userId);             // 不同團,但凍結是以「人」為單位算的
+            String userId = seedUser(userMapper, "race", 100);
+            String orderA = seedOpenOrder(orderMapper, userId, "併發測試團");
+            String orderB = seedOpenOrder(orderMapper, userId, "併發測試團");  // 不同團,但凍結是以「人」為單位算的
 
             Result r = runConcurrently(userId, orderA, orderB);
 
@@ -113,28 +110,6 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     }
 
     // ========== helpers ==========
-
-    private String seedUser(long balance) {
-        User user = new User();
-        user.setUserId("race-" + UUID.randomUUID().toString().substring(0, 8));
-        user.setUserName("Race Tester");
-        user.setPassword("$2a$10$XPMeuJdtYd.vXoarK3BdxOpBip8zRR5Ql3/cORtUn/N9G1pfnIAQW");
-        user.setBalance(balance);
-        userMapper.insert(user);
-        return user.getUserId();
-    }
-
-    private String seedOrder(String userId) {
-        Order order = new Order();
-        order.setOrderId(UUID.randomUUID().toString());
-        order.setStoreId("store001");
-        order.setCreatedBy(userId);
-        order.setOrderName("併發測試團");
-        order.setStatus(OrderStatus.OPEN);
-        order.setDeadline(LocalDateTime.now().plusHours(1));
-        orderMapper.insert(order);
-        return order.getOrderId();
-    }
 
     private record Result(int successCount, List<Throwable> errors) {}
 
