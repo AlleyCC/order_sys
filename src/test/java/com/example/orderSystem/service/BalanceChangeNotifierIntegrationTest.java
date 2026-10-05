@@ -60,7 +60,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("下單:createUserOrder 自己的交易 commit 後 → 推送 commit 後的可用餘額")
     void pushesAfterOwnCommit() {
         String userId = seedUser(userMapper, "notify", 1000);
-        String orderId = seedOpenOrder(orderMapper, userId, "推播測試團");
+        String orderId = seedOpenOrder(orderMapper, userId);
 
         orderService.createUserOrder(createReq(orderId), userId);
 
@@ -71,7 +71,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("下單:交易還沒 commit → 不推播;commit 之後才推")
     void doesNotPushBeforeCommit() {
         String userId = seedUser(userMapper, "notify", 1000);
-        String orderId = seedOpenOrder(orderMapper, userId, "推播測試團");
+        String orderId = seedOpenOrder(orderMapper, userId);
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             orderService.createUserOrder(createReq(orderId), userId);
@@ -85,7 +85,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("下單:交易 rollback → 品項沒有寫入,也不推播")
     void noPushWhenRolledBack() {
         String userId = seedUser(userMapper, "notify", 1000);
-        String orderId = seedOpenOrder(orderMapper, userId, "推播測試團");
+        String orderId = seedOpenOrder(orderMapper, userId);
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             orderService.createUserOrder(createReq(orderId), userId);
@@ -100,7 +100,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("刪除品項:沒有交易 → 刪除後立即推送釋放凍結後的可用餘額")
     void deleteItemPushesBalance() {
         String userId = seedUser(userMapper, "notify", 1000);
-        String orderId = seedOpenOrder(orderMapper, userId, "推播測試團");
+        String orderId = seedOpenOrder(orderMapper, userId);
         orderService.createUserOrder(createReq(orderId), userId);
         clearInvocations(notificationService);
 
@@ -113,7 +113,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("刪除品項:推播失敗 → 刪除照樣成功,不回錯誤給使用者")
     void deleteItemSucceedsWhenPushFails() {
         String userId = seedUser(userMapper, "notify", 1000);
-        String orderId = seedOpenOrder(orderMapper, userId, "推播測試團");
+        String orderId = seedOpenOrder(orderMapper, userId);
         orderService.createUserOrder(createReq(orderId), userId);
         doThrow(new RedisConnectionFailureException("Redis 斷線"))
                 .when(notificationService).sendBalanceUpdate(anyString(), anyLong(), anyString());

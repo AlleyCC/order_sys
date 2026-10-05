@@ -49,7 +49,7 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     void onlyOneSucceedsWhenBalanceCoversOne() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
             String userId = seedUser(userMapper, "race", 100);  // 100 夠一筆 70,不夠兩筆 140
-            String orderId = seedOpenOrder(orderMapper, userId, "併發測試團");
+            String orderId = seedOpenOrder(orderMapper, userId);
 
             Result r = runConcurrently(userId, orderId, orderId);
 
@@ -69,7 +69,7 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     void bothSucceedWhenBalanceCoversBoth() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
             String userId = seedUser(userMapper, "race", 200);  // 200 夠兩筆 70
-            String orderId = seedOpenOrder(orderMapper, userId, "併發測試團");
+            String orderId = seedOpenOrder(orderMapper, userId);
 
             Result r = runConcurrently(userId, orderId, orderId);
 
@@ -85,8 +85,8 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
     void invariantHoldsAcrossDifferentOrders() throws Exception {
         for (int round = 0; round < ROUNDS; round++) {
             String userId = seedUser(userMapper, "race", 100);
-            String orderA = seedOpenOrder(orderMapper, userId, "併發測試團");
-            String orderB = seedOpenOrder(orderMapper, userId, "併發測試團");  // 不同團,但凍結是以「人」為單位算的
+            String orderA = seedOpenOrder(orderMapper, userId);
+            String orderB = seedOpenOrder(orderMapper, userId);  // 不同團,但凍結是以「人」為單位算的
 
             Result r = runConcurrently(userId, orderA, orderB);
 
