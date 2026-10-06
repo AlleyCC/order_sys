@@ -43,7 +43,7 @@ Client (REST + WebSocket)
   │                ▼
   │            [MySQL 8.0] ── paypool 資料庫
   │
-  └── WS ───→ [WebSocket (STOMP)] ── 即時訂單同步 / 聊天 / 通知
+  └── WS ───→ [WebSocket (STOMP)] ── 即時餘額同步 / 結算通知
                    │
                    ▼
                [DelayQueue] ── deadline 到期觸發自動結算
@@ -949,7 +949,6 @@ src/main/java/com/example/orderSystem/
 │   │   └── TransactionResponse.java
 │   └── websocket/                       # WebSocket 訊息 DTO
 │       ├── BalanceMessage.java
-│       ├── ChatMessage.java
 │       └── SettlementMessage.java
 ├── enums/
 │   ├── OrderStatus.java
@@ -965,8 +964,6 @@ src/main/java/com/example/orderSystem/
 │   ├── OrderSettlementTask.java         # DelayQueue 任務 (implements Delayed)
 │   ├── OrderSettlementConsumer.java     # 背景執行緒，消費到期任務
 │   └── OrderSettlementQueue.java        # DelayQueue 管理 (新增/移除/重啟恢復)
-├── websocket/
-│   └── ChatController.java              # 團購聊天室 (STOMP handler)
 └── util/
     ├── JwtUtils.java                    # JWT 簽發/驗證
     ├── BcryptUtils.java                 # BCrypt 雜湊
@@ -1032,8 +1029,7 @@ status=OPEN      檢查餘額                status=CLOSED       SETTLED / FAILE
             │
             │  deadline 前可進行：
             ├── create_user_order (下單，WS 即時同步)
-            ├── delete_user_order (刪除品項)
-            └── 團購聊天 (WS)
+            └── delete_user_order (刪除品項)
 ```
 
 ### 7.2 帳戶餘額定義
@@ -1191,7 +1187,6 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 |-------------|------|---------|---------|
 | `/user/queue/balance` | 帳戶餘額同步 | 當事人 | 下單、改單、刪除品項、扣款後 |
 | `/user/queue/notification` | 系統通知 | 當事人 | 扣款結果、訂單狀態變更 |
-| `/topic/order/{orderId}/chat` | 團購聊天室 | 同訂單所有人 | 用戶發送訊息 |
 
 > 訂單品項的異動（新增/刪除）不廣播給所有人，僅推送當事人的可用餘額更新。訂單明細由前端呼叫 `GET /order/get_order_detail` 主動查詢。
 
@@ -1239,19 +1234,6 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
   "orderName": "下午茶飲料團",
   "result": "ERROR",
   "detail": "系統結算失敗，已停止自動重試，請由管理員手動結算"
-}
-```
-
-**聊天訊息格式：**
-
-```json
-{
-  "type": "CHAT",
-  "orderId": "ord-002",
-  "userId": "alice",
-  "userName": "Alice Chen",
-  "message": "有人要加點嗎？湊個 $250 免運",
-  "timestamp": "2025-04-15 14:30:00"
 }
 ```
 
@@ -1422,7 +1404,6 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 | 扣款失敗後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=FAILED) |
 | 自動重試用完後通知 | 團主與管理員的 `/user/queue/notification` 收到 SETTLEMENT (result=ERROR) |
 | 其他用戶下單不會收到通知 | 非當事人不收到 BALANCE_UPDATED |
-| 聊天訊息發送與接收 | `/topic/order/{orderId}/chat` 收到 CHAT |
 | 未認證的 WebSocket 連線 | 拒絕連線 |
 
 ### 8.7 Mapper 整合測試重點
