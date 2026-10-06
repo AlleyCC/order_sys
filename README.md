@@ -226,7 +226,6 @@ flowchart LR
 
     WS --> B["/user/queue/balance<br/>餘額同步（當事人）"]
     WS --> N["/user/queue/notification<br/>結算通知（當事人）"]
-    WS --> CH["/topic/order/{orderId}/chat<br/>團購聊天（同訂單所有人）"]
 ```
 
 Multi-instance 下透過 **Redis Pub/Sub** 由 `RedisWebSocketRelay` 轉送到對應實例的 WS session。
