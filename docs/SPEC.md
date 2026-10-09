@@ -116,6 +116,8 @@ Client (REST + WebSocket)
 | `POST /order/cancel_order` | Yes |
 | `POST /order/pay_order` | Yes |
 | `GET /user/get_user_transaction_record` | Yes |
+| `GET /user/get_unread_notifications` | Yes |
+| `POST /user/read_notification` | Yes |
 | `WS /ws` | Yes (STOMP 連線時驗證 JWT) |
 | `POST /category/create_category` | Yes + RBAC 授權(見 2.7) |
 | `PATCH /category/update_category` | Yes + RBAC 授權(見 2.7) |
@@ -238,7 +240,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 > 由 service 層判斷「開團者 or 客服 / 超級管理員」。授權層回答「能不能呼叫這支 API」,
 > service 層回答「能不能動這一筆資料」。
 
-#### 2.7.7 資料表(V6/V7/V9/V10 migration)
+#### 2.7.7 資料表(V6/V7/V9 migration)
 
 | 表 | 重點欄位 | 約束 |
 |----|---------|------|
@@ -694,8 +696,10 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 { "status": 404, "detail": "訂單不存在" }
 { "status": 409, "detail": "該訂單已結算，無法進行付款" }
 { "status": 409, "detail": "訂單狀態已變更，無法結算" }
-{ "status": 400, "detail": "alice 餘額不足" }
+{ "status": 400, "detail": "餘額不足:alice, bob" }
 ```
+
+餘額不足時 `detail` 列出**所有**餘額不足的使用者。
 
 **業務邏輯 (��用 `@Transactional`):**
 1. 確認訂單存在且狀態為 CLOSED 或 FAILED（SETTLED 回傳 409，OPEN 回傳 400）
@@ -703,9 +707,11 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 3. 依 `order_items` 按 `user_id` 分組，加總每人 `subtotal`
 4. 逐一對每位使用者執行 CAS 扣款：`UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?`
 5. `affected_rows = 1` → 扣款成功，讀取新 balance，寫入 `transactions` (type='DEBIT')
-6. `affected_rows = 0` → 餘額不足，rollback 所有扣款（第 2 步搶下的狀態也一起退回），再於交易外把狀態更新為 FAILED
-7. 全部成功 → commit，狀態即為第 2 步寫入的 SETTLED
-8. 透過 WebSocket 推送扣款結果通知 (`/user/queue/notification`) 及餘額更新 (`/user/queue/balance`) 給相關用戶
+6. `affected_rows = 0` → 記下此人，**繼續扣下一位**（試扣完所有人才知道誰不夠）
+7. 有任何人不足 → rollback 所有扣款（第 2 步搶下的狀態也一起退回）；再開**另一個交易**，條件式把狀態改為 FAILED（`status IN ('CLOSED','FAILED')`）並寫入失敗通知。條件不成立（已被別人結算）就不改狀態、不寫通知
+8. 全部成功 → 在**同一個交易**寫入結算成功通知，commit，狀態即為第 2 步寫入的 SETTLED
+9. commit 之後，逐則透過 WebSocket 推送剛寫入的通知 (`/user/queue/notification`)；推播失敗只記 log，不影響結果（見 7.5）
+10. 扣款成功時，再對每位參與者推送最新可用餘額 (`/user/queue/balance`，reason =「結算：{訂單名稱}」)；同樣盡力送達
 
 ---
 
@@ -743,6 +749,63 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 - `amount` 正數 = 儲值 (type='RECHARGE')
 - `amount` 負數 = 扣款 (type='DEBIT')
 
+#### GET `/user/get_unread_notifications`
+
+分頁查詢當前登入使用者的未讀通知(**僅本人**,不接受 userId 參數),依建立時間新到舊。前端在 WebSocket 連線/重連後呼叫一次,補齊離線期間錯過的推播。
+
+**Request:**
+
+| 位置 | 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|------|
+| Header | Authorization | String | Y | `Bearer <JWT>` |
+| Query | page | int | N | 預設 1 |
+| Query | size | int | N | 預設 10,上限 20 |
+
+**Response 200 OK:**
+
+```json
+{
+  "records": [
+    {
+      "notificationId": "5f0c…",
+      "type": "SETTLEMENT_INSUFFICIENT",
+      "orderId": "ord-002",
+      "content": "「下午茶飲料團」結算失敗:你的餘額不足 55 元,請儲值後聯繫團主重新結算",
+      "createdAt": "2026-10-08T12:00:00.123"
+    }
+  ],
+  "page": 1, "size": 10, "total": 1, "totalPages": 1
+}
+```
+
+#### POST `/user/read_notification`
+
+將自己的一則通知標為已讀。
+
+**Request:**
+
+| 位置 | 欄位 | 型別 | 必填 | 說明 |
+|------|------|------|------|------|
+| Header | Authorization | String | Y | `Bearer <JWT>` |
+| Body | notificationId | String | Y | 通知 ID |
+
+**Response 200 OK:**
+
+```json
+{ "message": "已標為已讀" }
+```
+
+**Response 404 Not Found:**
+
+```json
+{ "status": 404, "detail": "通知不存在" }
+```
+
+**業務邏輯:**
+- `UPDATE notifications SET read_at = NOW() WHERE notification_id = ? AND user_id = ? AND read_at IS NULL`
+- 影響 0 列時再確認是否為本人已讀過的通知:是 → 200(重複標記視為成功);否 → 404
+- 別人的通知與不存在的通知一律 404,不透露該 id 是否存在
+
 ---
 
 ## 4. 資料庫設計
@@ -754,7 +817,8 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 ```
 users (1) ──┬──< orders (N)          [created_by → user_id]
             ├──< order_items (N)     [user_id → user_id]
-            └──< transactions (N)    [user_id → user_id]
+            ├──< transactions (N)    [user_id → user_id]
+            └──< notifications (N)   [user_id → user_id]
 
 stores (1) ──┬──< orders (N)         [store_id → store_id]
              └──< menus (N)          [store_id → store_id]
@@ -852,6 +916,23 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 
 索引: `(user_id, created_at DESC)` 複合索引，加速交易紀錄查詢。
 
+#### notifications - 站內通知(V10)
+
+| 欄位 | 型別 | PK | NOT NULL | 說明 |
+|------|------|----|----------|------|
+| notification_id | VARCHAR(36) | Y | Y | UUID |
+| user_id | VARCHAR(20) | | Y | 收件人,FK → users (RESTRICT) |
+| order_id | VARCHAR(36) | | | 相關訂單;**不加外鍵**,通知是歷史紀錄,不擋訂單的任何操作 |
+| type | VARCHAR(30) | | Y | 見「列舉定義 NotificationType」 |
+| content | VARCHAR(255) | | Y | 寫入當下的完整訊息,之後改文案不影響歷史通知 |
+| dedup_key | VARCHAR(64) | | | 只有需要去重的類型才填(自動重試用完 = `ABANDONED:{orderId}`),其餘為 NULL |
+| read_at | DATETIME | | | NULL = 未讀 |
+| created_at | DATETIME(3) | | Y | 毫秒精度:同一次結算寫入多則,未讀排序才穩定 |
+
+約束與索引:
+- `UNIQUE(user_id, dedup_key)`:同一收件人、同一個去重鍵只能有一則。MySQL 的 UNIQUE 允許多個 NULL,所以不需要去重的通知(例如每次結算失敗)不受影響
+- `(user_id, read_at, created_at)`:查未讀時 `user_id = ? AND read_at IS NULL` 之後,`created_at` 已排好序
+
 ---
 
 ## 5. 列舉定義
@@ -893,6 +974,17 @@ OPEN ──→ CLOSED ──→ SETTLED
 |------|------|
 | DEBIT | 扣款 |
 | RECHARGE | 儲值 |
+
+### NotificationType
+
+| 名稱 | 收件人 | 推播 result |
+|------|--------|------------|
+| SETTLEMENT_SUCCEEDED | 結算成功:參與者(團主除外) | SETTLED |
+| SETTLEMENT_SUCCEEDED_OWNER | 結算成功:團主(不論是否參與;有參與時附本人金額與餘額) | SETTLED |
+| SETTLEMENT_INSUFFICIENT | 結算失敗:餘額不足的參與者(團主除外) | FAILED |
+| SETTLEMENT_BLOCKED | 結算失敗:餘額足夠的參與者(團主除外),告知金額仍凍結 | FAILED |
+| SETTLEMENT_FAILED_OWNER | 結算失敗:團主,列出所有餘額不足者 | FAILED |
+| SETTLEMENT_ABANDONED | 自動重試用完:團主與 `SUPER_ADMIN`、`CUSTOMER_SERVICE` | ERROR |
 
 ---
 
@@ -1107,9 +1199,10 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
    c. 按 user_id 分組加總 order_items.subtotal
    d. 逐一對每位使用者執行 CAS 扣款：UPDATE users SET balance = balance - ? WHERE user_id = ? AND balance >= ?
    e. affected_rows = 1 → 成功，讀取新 balance，寫入 transactions (type='DEBIT')
-   f. 全部成功 → commit，狀態 = SETTLED
-   g. 任一 affected_rows = 0 → 餘額不足，rollback 所有扣款，狀態 → FAILED
-4. 透過 WebSocket 推送結算結果給所有相關用戶
+      affected_rows = 0 → 記下此人，繼續扣下一位
+   f. 全部成功 → 同一個交易寫入結算成功通知 → commit，狀態 = SETTLED
+   g. 有人不足 → rollback 所有扣款；另一個交易條件式把狀態改為 FAILED 並寫入失敗通知
+4. commit 之後透過 WebSocket 推送剛寫入的通知（盡力送達，見 7.5）
 5. 應用重啟時：從 DB 撈 status=OPEN 的訂單，重新放入 DelayQueue
 ```
 
@@ -1121,7 +1214,7 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 |------|------|
 | 重試間隔 | 依序 1、2、4、8、16 秒（每次加倍） |
 | 重試上限 | 5 次；次數記在 Redis hash `{order:settlement}:retries`，結算正常結束即清除 |
-| 用完之後 | 不再自動重試，訂單停在 CLOSED（金額仍凍結），通知團主與 `SUPER_ADMIN`、`CUSTOMER_SERVICE` 角色的使用者（同一人只通知一次），由管理員手動呼叫 pay_order。通知先記在待通知集合，送出成功才移除，失敗下一輪再送；訂單若已是 SETTLED／FAILED／CANCELLED 則不通知 |
+| 用完之後 | 不再自動重試，訂單停在 CLOSED（金額仍凍結），通知團主與 `SUPER_ADMIN`、`CUSTOMER_SERVICE` 角色的使用者（同一人只通知一次），由管理員手動呼叫 pay_order。通知先記在待通知集合，寫入站內通知成功才移除，失敗下一輪再送；重送時已寫入的收件人由 `UNIQUE(user_id, dedup_key)` 擋下、不再推播。訂單若已是 SETTLED／FAILED／CANCELLED 則不通知 |
 | 不重試的情況 | 餘額不足造成的 FAILED 不自動重試，只能手動 pay_order |
 
 #### 認領與租約
@@ -1154,7 +1247,7 @@ key 都帶 `{order:settlement}` hash tag：Lua 腳本一次操作多個 key，�
 
 | 情況 | 結果 | 目前處理 |
 |------|------|---------|
-| 已從待通知集合取出、通知送出前機器當掉 | 訂單停在 OPEN 或 CLOSED，沒有人收到通知 | 無（窗口只有一次通知的時間） |
+| 已從待通知集合取出、站內通知寫入前機器當掉 | 訂單停在 OPEN 或 CLOSED，沒有人收到通知 | 無（窗口只有一次寫入的時間） |
 | 結算在 OPEN → CLOSED 之前就持續失敗，直到放棄 | 訂單停在 OPEN，截止後仍可能被下單 | 無 |
 | 認領腳本上線前就已經遺失的訂單 | 截止已過、狀態仍為 OPEN／CLOSED，不在任何佇列中 | 由管理員查詢後手動 pay_order |
 
@@ -1205,42 +1298,19 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 }
 ```
 
-**扣款通知訊息格式：**
+**結算通知訊息格式：**（成功、失敗、自動重試用完共用；內容即站內通知的 `content`）
 
 ```json
 {
   "type": "SETTLEMENT",
+  "notificationId": "5f0c…",
   "orderId": "ord-002",
-  "orderName": "下午茶飲料團",
-  "result": "SETTLED",
-  "amount": -55,
-  "balance": 4840
-}
-```
-
-**結算失敗通知：**
-
-```json
-{
-  "type": "SETTLEMENT",
-  "orderId": "ord-002",
-  "orderName": "下午茶飲料團",
   "result": "FAILED",
-  "detail": "餘額不足，請儲值後聯繫團主重新結算"
+  "detail": "「下午茶飲料團」結算失敗:你的餘額不足 55 元,請儲值後聯繫團主重新結算"
 }
 ```
 
-**自動重試用完通知**（推送給團主與管理員）：
-
-```json
-{
-  "type": "SETTLEMENT",
-  "orderId": "ord-002",
-  "orderName": "下午茶飲料團",
-  "result": "ERROR",
-  "detail": "系統結算失敗，已停止自動重試，請由管理員手動結算"
-}
-```
+`result` 依通知類型對應為 `SETTLED`／`FAILED`／`ERROR`（見「列舉定義 NotificationType」）。`notificationId` 讓前端和 `get_unread_notifications` 的結果去重。
 
 **聊天訊息格式：**
 
@@ -1254,6 +1324,23 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
   "timestamp": "2025-04-15 14:30:00"
 }
 ```
+
+### 7.5 結算通知:站內通知 + 盡力推播
+
+Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就消失了。因此結算通知先寫進 `notifications`,推播只負責盡力送達,收件人上線時用 `GET /user/get_unread_notifications` 補齊。
+
+**通知和它描述的狀態變化寫在同一個交易**,兩者一起成立或一起回滾:
+
+| 結果 | 寫在哪個交易 | 為什麼不能交易後再寫 |
+|------|------------|------------------|
+| 結算成功 | 扣款交易(SETTLED + 扣款 + transactions) | commit 後、寫入前當掉,扣了款卻沒有通知 |
+| 餘額不足 | 「條件式改為 FAILED」的交易 | 同上;條件不成立(已被別人結算)時也不能發「結算失敗」 |
+| 自動重試用完 | 沒有對應的狀態變化 | 改用 `UNIQUE(user_id, dedup_key)` 讓重送不重複 |
+
+- 每次結算失敗(含團主重試後再失敗)都是新的一則,不合併
+- 團主同時是參與者時,只收團主版一則(團主版已含本人資訊)
+- 推播在交易方法回傳之後才送,所以一定在 commit 之後;推播失敗只記 log
+- 手動 `pay_order` 和自動結算走同一條路,通知行為一致
 
 ---
 
@@ -1355,6 +1442,8 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 | 訂單仍開團中 (status=OPEN) | 400，detail: "訂單尚未截止" |
 | 訂單已取消 (status=CANCELLED) | 400 |
 | 其中一位使用者餘額不足 | 400，狀態 → FAILED，不扣任何人 |
+| 多位使用者餘額不足 | 400，`detail` 列出所有不足者；不足者、足夠者、團主各收到對應的失敗通知 |
+| 正常扣款 | 參與者與團主都有結算成功通知 |
 | 訂單內無品項 | 400 |
 | 扣款後驗證 users.balance 正確 | balance = 原餘額 - SUM(subtotal) |
 | 扣款後驗證訂單狀態 = SETTLED | status = 'SETTLED' |
@@ -1370,6 +1459,23 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 | 有交易紀錄的使用者 | 200，RECHARGE 為正數，DEBIT 為負數 |
 | 無交易紀錄的使用者 | 200，空陣列 |
 | 未帶 Token | 401 |
+
+#### get_unread_notifications
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 有已讀、未讀與別人的通知 | 200，只回自己的未讀，新的在前 |
+| size 超過 20 | 400 |
+| 未帶 Token | 401 |
+
+#### read_notification
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 標自己的未讀通知 | 200，之後查未讀不含該則 |
+| 重複標記 | 200 |
+| 標別人的通知 | 404，對方仍為未讀 |
+| 通知不存在 | 404 |
 
 #### get_user_account
 
