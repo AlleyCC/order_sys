@@ -321,6 +321,10 @@ class OrderControllerTest extends AbstractIntegrationTest {
         @Test
         @DisplayName("預設分頁 → 200, 回傳 records + total + page 資訊")
         void returnsPagedOrders() throws Exception {
+            // 自己建立需要的 OPEN 訂單,不依賴其他測試在共用資料庫留下的資料
+            seedOpenOrder("bob");
+            seedOpenOrder("bob");
+
             mockMvc.perform(get("/order/get_all_orders")
                             .header("Authorization", "Bearer " + aliceToken))
                     .andExpect(status().isOk())
@@ -334,8 +338,34 @@ class OrderControllerTest extends AbstractIntegrationTest {
         }
 
         @Test
+        @DisplayName("新的訂單在前:建立時間較晚者排在前面")
+        void newestFirst() throws Exception {
+            // 建立時間設在未來,確保比共用資料庫裡其他測試留下的訂單都新
+            String older = seedOpenOrderCreatedAt(LocalDateTime.now().plusDays(2));
+            String newer = seedOpenOrderCreatedAt(LocalDateTime.now().plusDays(3));
+
+            mockMvc.perform(get("/order/get_all_orders")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.records[0].orderId").value(newer))
+                    .andExpect(jsonPath("$.records[1].orderId").value(older));
+        }
+
+        private String seedOpenOrderCreatedAt(LocalDateTime createdAt) {
+            String orderId = seedOpenOrder("bob");
+            Order update = new Order();
+            update.setOrderId(orderId);
+            update.setCreatedAt(createdAt);
+            orderMapper.updateById(update);
+            return orderId;
+        }
+
+        @Test
         @DisplayName("指定 page=1, size=1 → 只回傳 1 筆")
         void customPageSize() throws Exception {
+            seedOpenOrder("bob");
+            seedOpenOrder("bob");
+
             mockMvc.perform(get("/order/get_all_orders")
                             .param("page", "1")
                             .param("size", "1")
