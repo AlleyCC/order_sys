@@ -55,11 +55,10 @@ class RedisWebSocketIntegrationTest {
     @Test
     @DisplayName("publish → Redis channel → relay → convertAndSendToUser（端對端）")
     void publisherToRelayEndToEnd() {
-        BalanceMessage msg = new BalanceMessage(4500, "測試");
+        BalanceMessage msg = new BalanceMessage("測試");
 
         publisher.publish("alice", "/queue/balance", msg);
 
-        // Relay listens asynchronously; wait up to 3 seconds for delivery
         verify(messagingTemplate, timeout(Duration.ofSeconds(3).toMillis()))
                 .convertAndSendToUser(eq("alice"), eq("/queue/balance"), any());
     }
