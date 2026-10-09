@@ -1,10 +1,14 @@
 package com.example.orderSystem.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.orderSystem.dto.response.TransactionResponse;
+import com.example.orderSystem.entity.Notification;
 import com.example.orderSystem.entity.Transaction;
 import com.example.orderSystem.enums.TradeType;
 import com.example.orderSystem.exception.ResourceNotFoundException;
+import com.example.orderSystem.mapper.NotificationMapper;
 import com.example.orderSystem.mapper.TransactionMapper;
 import com.example.orderSystem.mapper.UserMapper;
 import lombok.RequiredArgsConstructor;
@@ -18,6 +22,7 @@ public class UserService {
 
     private final TransactionMapper transactionMapper;
     private final UserMapper userMapper;
+    private final NotificationMapper notificationMapper;
 
     public List<TransactionResponse> getTransactionRecord(String userId) {
         if (userMapper.selectById(userId) == null) {
@@ -38,5 +43,25 @@ public class UserService {
             resp.setCreatedAt(t.getCreatedAt());
             return resp;
         }).toList();
+    }
+
+    public IPage<Notification> getUnreadNotifications(String userId, int page, int size) {
+        return notificationMapper.selectUnread(new Page<>(page, size), userId);
+    }
+
+    /**
+     * 標為已讀,重複標記視為成功。
+     * 不存在與「不是自己的」都回 404,不讓呼叫者藉此探測別人的通知 id 是否存在。
+     */
+    public void markNotificationRead(String userId, String notificationId) {
+        if (notificationMapper.markRead(notificationId, userId) == 1) {
+            return;
+        }
+        boolean ownedByCaller = notificationMapper.exists(new LambdaQueryWrapper<Notification>()
+                .eq(Notification::getNotificationId, notificationId)
+                .eq(Notification::getUserId, userId));
+        if (!ownedByCaller) {
+            throw new ResourceNotFoundException("通知不存在");
+        }
     }
 }
