@@ -1,13 +1,16 @@
 package com.example.orderSystem.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.example.orderSystem.entity.Notification;
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.OrderItem;
 import com.example.orderSystem.entity.Role;
 import com.example.orderSystem.entity.Store;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.entity.UserRole;
+import com.example.orderSystem.enums.NotificationType;
 import com.example.orderSystem.enums.OrderStatus;
+import com.example.orderSystem.mapper.NotificationMapper;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
 import com.example.orderSystem.mapper.RoleMapper;
@@ -75,6 +78,9 @@ class OrderControllerTest extends AbstractIntegrationTest {
 
     @Autowired
     private StoreMapper storeMapper;
+
+    @Autowired
+    private NotificationMapper notificationMapper;
 
     private String aliceToken;
     private String bobToken;
@@ -803,6 +809,85 @@ class OrderControllerTest extends AbstractIntegrationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"orderId\":\"nonexistent\"}"))
                     .andExpect(status().isNotFound());
+        }
+
+        @Test
+        @DisplayName("兩人餘額不足 → 400,detail 列出兩人;訂單 FAILED,各方收到失敗通知")
+        void insufficientListsEveryShortUser() throws Exception {
+            String owner = seedPayUser("pay-owner", 0);
+            String ming = seedPayUser("pay-ming", 10);
+            String mei = seedPayUser("pay-mei", 20);
+            String hua = seedPayUser("pay-hua", 500);
+            String orderId = seedClosedOrder(owner, ming, mei, hua);
+
+            mockMvc.perform(post("/order/pay_order")
+                            .header("Authorization", "Bearer " + jwtUtils.generateAccessToken(owner))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"orderId\":\"" + orderId + "\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.detail", allOf(containsString(ming), containsString(mei),
+                            not(containsString(hua)))));
+
+            assertThat(orderMapper.selectById(orderId).getStatus()).isEqualTo(OrderStatus.FAILED);
+            assertThat(notificationTypes(ming, orderId)).containsExactly(NotificationType.SETTLEMENT_INSUFFICIENT);
+            assertThat(notificationTypes(hua, orderId)).containsExactly(NotificationType.SETTLEMENT_BLOCKED);
+            assertThat(notificationTypes(owner, orderId)).containsExactly(NotificationType.SETTLEMENT_FAILED_OWNER);
+        }
+
+        @Test
+        @DisplayName("手動結算成功 → 參與者與團主都有通知(和自動結算一致)")
+        void successNotifiesParticipantsAndOwner() throws Exception {
+            String owner = seedPayUser("pay-owner", 0);
+            String ming = seedPayUser("pay-ming", 500);
+            String orderId = seedClosedOrder(owner, ming);
+
+            mockMvc.perform(post("/order/pay_order")
+                            .header("Authorization", "Bearer " + jwtUtils.generateAccessToken(owner))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"orderId\":\"" + orderId + "\"}"))
+                    .andExpect(status().isOk());
+
+            assertThat(notificationTypes(ming, orderId)).containsExactly(NotificationType.SETTLEMENT_SUCCEEDED);
+            assertThat(notificationTypes(owner, orderId)).containsExactly(NotificationType.SETTLEMENT_SUCCEEDED_OWNER);
+        }
+
+        private List<NotificationType> notificationTypes(String userId, String orderId) {
+            return notificationMapper.selectList(new QueryWrapper<Notification>()
+                            .eq("user_id", userId).eq("order_id", orderId))
+                    .stream().map(Notification::getType).toList();
+        }
+
+        private String seedPayUser(String prefix, long balance) {
+            User user = new User();
+            user.setUserId(prefix + "-" + UUID.randomUUID().toString().substring(0, 6));
+            user.setUserName(prefix);
+            user.setPassword("$2a$10$XPMeuJdtYd.vXoarK3BdxOpBip8zRR5Ql3/cORtUn/N9G1pfnIAQW");
+            user.setBalance(balance);
+            userMapper.insert(user);
+            return user.getUserId();
+        }
+
+        /** 每位參與者各訂一份;不用 RESCUE_PREFIX,結算成功會留下指向訂單的交易紀錄,不能被清掉 */
+        private String seedClosedOrder(String owner, String... participants) {
+            Order order = new Order();
+            order.setOrderId(UUID.randomUUID().toString());
+            order.setStoreId("store001");
+            order.setCreatedBy(owner);
+            order.setOrderName("手動結算測試團");
+            order.setStatus(OrderStatus.CLOSED);
+            order.setDeadline(LocalDateTime.now().minusMinutes(1));
+            orderMapper.insert(order);
+            for (String userId : participants) {
+                OrderItem item = new OrderItem();
+                item.setOrderId(order.getOrderId());
+                item.setUserId(userId);
+                item.setMenuId(1);
+                item.setProductName("招牌鍋貼(10入)");
+                item.setUnitPrice(70);
+                item.setQuantity(1);
+                orderItemMapper.insert(item);
+            }
+            return order.getOrderId();
         }
     }
 }

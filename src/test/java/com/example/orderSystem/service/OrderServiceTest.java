@@ -21,6 +21,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -62,6 +63,8 @@ class OrderServiceTest {
     private RbacCacheService rbacCacheService;
     @Mock
     private RoleMapper roleMapper;
+    @Mock
+    private SettlementNotificationRecorder notificationRecorder;
 
     // ========== helpers ==========
 
@@ -82,6 +85,14 @@ class OrderServiceTest {
         o.setStatus(status);
         o.setDeadline(LocalDateTime.now().plusHours(2));
         return o;
+    }
+
+    private Notification notification(String userId) {
+        Notification n = new Notification();
+        n.setNotificationId("ntf-" + userId);
+        n.setUserId(userId);
+        n.setOrderId("ord-001");
+        return n;
     }
 
     private Menu createMenu(int menuId, String storeId) {
@@ -407,21 +418,109 @@ class OrderServiceTest {
         }
 
         @Test
-        @DisplayName("餘額不足 → FAILED + 拋出 InsufficientBalanceException")
+        @DisplayName("扣款成功 → commit 後依寫入的通知逐則推播")
+        void pushesWrittenNotificationsOnSuccess() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            Notification bob = notification("bob");
+            Notification alice = notification("alice");
+            when(paymentService.executePayment(order)).thenReturn(List.of(bob, alice));
+
+            orderService.payOrder("ord-001");
+
+            verify(notificationService).pushSettlement(bob);
+            verify(notificationService).pushSettlement(alice);
+        }
+
+        @Test
+        @DisplayName("餘額不足 → markFailed(帶所有不足者)、推播失敗通知、再拋出;不再無條件 updateById")
         void insufficientBalance() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
-            doThrow(new InsufficientBalanceException("alice 餘額不足"))
-                    .when(paymentService).executePayment(order);
-            List<OrderStatus> persistedStatuses = new ArrayList<>();
-            when(orderMapper.updateById((Order) any())).thenAnswer(inv -> {
-                persistedStatuses.add(inv.<Order>getArgument(0).getStatus());
-                return 1;
-            });
+            InsufficientBalanceException shortage = new InsufficientBalanceException(List.of("bob", "carol"));
+            doThrow(shortage).when(paymentService).executePayment(order);
+            Notification bob = notification("bob");
+            when(paymentService.markFailed(order, List.of("bob", "carol"))).thenReturn(List.of(bob));
+
+            assertThatThrownBy(() -> orderService.payOrder("ord-001")).isSameAs(shortage);
+            verify(notificationService).pushSettlement(bob);
+            verify(orderMapper, never()).updateById((Order) any());
+        }
+
+        @Test
+        @DisplayName("推播失敗(成功時)→ payOrder 仍正常返回,其餘通知照推")
+        void pushFailureDoesNotAffectSuccess() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            Notification bob = notification("bob");
+            Notification alice = notification("alice");
+            when(paymentService.executePayment(order)).thenReturn(List.of(bob, alice));
+            doThrow(new RuntimeException("redis down")).when(notificationService).pushSettlement(bob);
+
+            assertThatCode(() -> orderService.payOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService).pushSettlement(alice);
+        }
+
+        @Test
+        @DisplayName("推播失敗(餘額不足時)→ 仍拋出原本的 InsufficientBalanceException")
+        void pushFailureKeepsOriginalException() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            InsufficientBalanceException shortage = new InsufficientBalanceException(List.of("bob"));
+            doThrow(shortage).when(paymentService).executePayment(order);
+            Notification bob = notification("bob");
+            when(paymentService.markFailed(order, List.of("bob"))).thenReturn(List.of(bob));
+            doThrow(new RuntimeException("redis down")).when(notificationService).pushSettlement(bob);
+
+            assertThatThrownBy(() -> orderService.payOrder("ord-001")).isSameAs(shortage);
+        }
+
+        @Test
+        @DisplayName("扣款成功 → 每位參與者各推一次可用餘額(同一人多個品項只推一次)")
+        void pushesBalanceToEachParticipantOnSuccess() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderItemMapper.selectList(any())).thenReturn(List.of(
+                    createOrderItem(1, "ord-001", "bob", 70),
+                    createOrderItem(2, "ord-001", "bob", 30),
+                    createOrderItem(3, "ord-001", "carol", 50)));
+            when(userMapper.selectById("bob")).thenReturn(createUser("bob", 400));
+            when(userMapper.selectById("carol")).thenReturn(createUser("carol", 950));
+            when(orderItemMapper.getFrozenAmount("bob")).thenReturn(100L);
+            when(orderItemMapper.getFrozenAmount("carol")).thenReturn(0L);
+
+            orderService.payOrder("ord-001");
+
+            verify(notificationService).sendBalanceUpdate("bob", 300, "結算：Test Order");
+            verify(notificationService).sendBalanceUpdate("carol", 950, "結算：Test Order");
+            verify(notificationService, times(2)).sendBalanceUpdate(any(), anyLong(), any());
+        }
+
+        @Test
+        @DisplayName("餘額推播失敗 → payOrder 仍正常返回,其他人照推")
+        void balancePushFailureDoesNotAffectSuccess() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderItemMapper.selectList(any())).thenReturn(List.of(
+                    createOrderItem(1, "ord-001", "bob", 70),
+                    createOrderItem(2, "ord-001", "carol", 50)));
+            when(userMapper.selectById("bob")).thenThrow(new RuntimeException("db hiccup"));
+            when(userMapper.selectById("carol")).thenReturn(createUser("carol", 950));
+
+            assertThatCode(() -> orderService.payOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService).sendBalanceUpdate(eq("carol"), anyLong(), any());
+        }
+
+        @Test
+        @DisplayName("餘額不足 → 沒有人被扣款,不推餘額")
+        void noBalancePushOnInsufficient() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            doThrow(new InsufficientBalanceException(List.of("bob"))).when(paymentService).executePayment(order);
 
             assertThatThrownBy(() -> orderService.payOrder("ord-001"))
                     .isInstanceOf(InsufficientBalanceException.class);
-            assertThat(persistedStatuses).containsExactly(OrderStatus.FAILED);
+            verify(notificationService, never()).sendBalanceUpdate(any(), anyLong(), any());
         }
 
         @Test
@@ -512,7 +611,8 @@ class OrderServiceTest {
                     .when(paymentService).executePayment(order);
 
             assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
-            verify(notificationService, never()).sendSettlementFailed(any(), any(), any());
+            verify(paymentService, never()).markFailed(any(), any());
+            verify(notificationService, never()).pushSettlement(any());
         }
     }
 
@@ -529,10 +629,34 @@ class OrderServiceTest {
                     roles.containsAll(List.of("SUPER_ADMIN", "CUSTOMER_SERVICE")))))
                     .thenReturn(List.of("admin", "alice"));
 
+            Notification toAlice = notification("alice");
+            Notification toAdmin = notification("admin");
+            when(notificationRecorder.recordAbandoned(order, "alice")).thenReturn(toAlice);
+            when(notificationRecorder.recordAbandoned(order, "admin")).thenReturn(toAdmin);
+
             orderService.notifySettlementAbandoned("ord-001");
 
-            verify(notificationService).sendSettlementAbandoned("alice", "ord-001", "Test Order");
-            verify(notificationService).sendSettlementAbandoned("admin", "ord-001", "Test Order");
+            verify(notificationRecorder).recordAbandoned(order, "alice");
+            verify(notificationRecorder).recordAbandoned(order, "admin");
+            verifyNoMoreInteractions(notificationRecorder);
+            verify(notificationService).pushSettlement(toAlice);
+            verify(notificationService).pushSettlement(toAdmin);
+        }
+
+        @Test
+        @DisplayName("某收件人已有這張單的通知(重送)→ 不推播該人,其他人照常寫入與推播")
+        void duplicateIsSkippedWithoutPush() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(roleMapper.selectUserIdsByRoleNames(any())).thenReturn(List.of("admin"));
+            when(notificationRecorder.recordAbandoned(order, "alice"))
+                    .thenThrow(new DuplicateKeyException("uk_user_dedup"));
+            Notification toAdmin = notification("admin");
+            when(notificationRecorder.recordAbandoned(order, "admin")).thenReturn(toAdmin);
+
+            assertThatCode(() -> orderService.notifySettlementAbandoned("ord-001")).doesNotThrowAnyException();
+
+            verify(notificationService).pushSettlement(toAdmin);
             verifyNoMoreInteractions(notificationService);
         }
 
@@ -545,6 +669,7 @@ class OrderServiceTest {
 
             orderService.notifySettlementAbandoned("ord-001");
 
+            verifyNoInteractions(notificationRecorder);
             verifyNoInteractions(notificationService);
         }
     }

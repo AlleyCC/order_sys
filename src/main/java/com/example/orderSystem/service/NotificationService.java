@@ -2,6 +2,7 @@ package com.example.orderSystem.service;
 
 import com.example.orderSystem.dto.websocket.BalanceMessage;
 import com.example.orderSystem.dto.websocket.SettlementMessage;
+import com.example.orderSystem.entity.Notification;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -15,35 +16,22 @@ public class NotificationService {
         publisher.publish(userId, "/queue/balance", new BalanceMessage(availableBalance, reason));
     }
 
-    public void sendSettlementSuccess(String userId, String orderId, String orderName,
-                                      int amount, long balance) {
-        publisher.publish(userId, "/queue/notification",
+    /** 推播一則已保存的結算通知;只負責盡力送達,收件人離線時由查詢未讀補齊 */
+    public void pushSettlement(Notification notification) {
+        publisher.publish(notification.getUserId(), "/queue/notification",
                 SettlementMessage.builder()
-                        .orderId(orderId)
-                        .orderName(orderName)
-                        .result("SETTLED")
-                        .amount(-amount)
-                        .balance(balance)
+                        .notificationId(notification.getNotificationId())
+                        .orderId(notification.getOrderId())
+                        .result(resultOf(notification))
+                        .detail(notification.getContent())
                         .build());
     }
 
-    public void sendSettlementFailed(String userId, String orderId, String orderName) {
-        publisher.publish(userId, "/queue/notification",
-                SettlementMessage.builder()
-                        .orderId(orderId)
-                        .orderName(orderName)
-                        .result("FAILED")
-                        .detail("餘額不足，請儲值後聯繫團主重新結算")
-                        .build());
-    }
-
-    public void sendSettlementAbandoned(String userId, String orderId, String orderName) {
-        publisher.publish(userId, "/queue/notification",
-                SettlementMessage.builder()
-                        .orderId(orderId)
-                        .orderName(orderName)
-                        .result("ERROR")
-                        .detail("系統結算失敗，已停止自動重試，請由管理員手動結算")
-                        .build());
+    private static String resultOf(Notification notification) {
+        return switch (notification.getType()) {
+            case SETTLEMENT_SUCCEEDED, SETTLEMENT_SUCCEEDED_OWNER -> "SETTLED";
+            case SETTLEMENT_INSUFFICIENT, SETTLEMENT_BLOCKED, SETTLEMENT_FAILED_OWNER -> "FAILED";
+            case SETTLEMENT_ABANDONED -> "ERROR";
+        };
     }
 }

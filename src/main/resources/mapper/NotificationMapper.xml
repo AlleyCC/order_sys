@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.example.orderSystem.mapper.NotificationMapper">
+
+    <!-- 走 idx_user_unread (user_id, read_at, created_at):等值 + IS NULL 之後 created_at 已排好序 -->
+    <select id="selectUnread" resultType="com.example.orderSystem.entity.Notification">
+        SELECT notification_id, user_id, order_id, type, content, dedup_key, read_at, created_at
+        FROM notifications
+        WHERE user_id = #{userId}
+          AND read_at IS NULL
+        ORDER BY created_at DESC, notification_id DESC
+    </select>
+
+    <update id="markRead">
+        UPDATE notifications
+        SET read_at = NOW()
+        WHERE notification_id = #{notificationId}
+          AND user_id = #{userId}
+          AND read_at IS NULL
+    </update>
+
+</mapper>

@@ -16,6 +16,7 @@ import com.example.orderSystem.scheduler.RedisSettlementQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,6 +47,7 @@ public class OrderService {
     private final ApplicationEventPublisher eventPublisher;
     private final RbacCacheService rbacCacheService;
     private final RoleMapper roleMapper;
+    private final SettlementNotificationRecorder notificationRecorder;
 
     public IPage<Store> getAllShops(String storeName, int page, int size) {
         String name = StringUtils.hasText(storeName) ? escapeLike(storeName.trim()) : null;
@@ -288,14 +290,11 @@ public class OrderService {
             order.setStatus(OrderStatus.CLOSED);
         }
 
-        // Attempt payment
+        // Attempt payment(通知的寫入與推播都在 payOrder 內,手動結算走同一條路)
         try {
             payOrder(orderId);
-            // Notify all users of successful settlement
-            notifySettlementResult(order, true);
         } catch (InsufficientBalanceException e) {
             log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
-            notifySettlementResult(order, false);
         } catch (ConflictException e) {
             // 同時有人(例如團主手動 pay_order)先結算完了,這邊不用再做
             log.info("Order {} was settled concurrently, skipping", orderId);
@@ -315,32 +314,24 @@ public class OrderService {
         Set<String> recipients = new LinkedHashSet<>();
         recipients.add(order.getCreatedBy());
         recipients.addAll(roleMapper.selectUserIdsByRoleNames(RESCUE_ROLES));
+        // 呼叫端是 at-least-once(失敗會下一輪重送):每則寫入本身是原子的,
+        // 重送時已存在的由唯一鍵擋下並略過推播 —— 上次可能已推過,沒推過的收件人查未讀也看得到
         for (String userId : recipients) {
-            notificationService.sendSettlementAbandoned(userId, orderId, order.getOrderName());
-        }
-    }
-
-    private void notifySettlementResult(Order order, boolean success) {
-        List<OrderItem> items = orderItemMapper.selectList(
-                new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()));
-        Map<String, Long> userTotals = items.stream()
-                .collect(Collectors.groupingBy(
-                        OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
-
-        for (String userId : userTotals.keySet()) {
-            if (success) {
-                User user = userMapper.selectById(userId);
-                notificationService.sendSettlementSuccess(userId, order.getOrderId(),
-                        order.getOrderName(), userTotals.get(userId).intValue(), user.getBalance());
-            } else {
-                notificationService.sendSettlementFailed(userId, order.getOrderId(), order.getOrderName());
+            Notification notification;
+            try {
+                notification = notificationRecorder.recordAbandoned(order, userId);
+            } catch (DuplicateKeyException e) {
+                log.info("Abandoned notification for order {} already recorded for user {}", orderId, userId);
+                continue;
             }
+            pushQuietly(List.of(notification));
         }
     }
 
     /**
      * Pay order: CAS debit each user, write transactions, set SETTLED.
-     * On insufficient balance: set FAILED (outside transaction) then throw.
+     * On insufficient balance: set FAILED (separate transaction) then throw.
+     * 兩種結果的通知都在各自的交易內寫入,這裡在 commit 之後才推播。
      */
     public void payOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
@@ -357,13 +348,44 @@ public class OrderService {
             throw new IllegalStateException("訂單狀態不允許結算");
         }
 
+        List<Notification> written;
         try {
-            paymentService.executePayment(order);
+            written = paymentService.executePayment(order);
         } catch (InsufficientBalanceException e) {
-            // Set FAILED outside the rolled-back transaction
-            order.setStatus(OrderStatus.FAILED);
-            orderMapper.updateById(order);
+            // 扣款交易已回滾;在另一個交易把訂單轉為 FAILED 並寫入失敗通知
+            pushQuietly(paymentService.markFailed(order, e.getShortUserIds()));
             throw e;
+        }
+        pushQuietly(written);
+        pushBalanceUpdates(order);
+    }
+
+    /** 扣款已 commit:每位參與者的餘額變了(凍結也解除了),各推一次最新可用餘額 */
+    private void pushBalanceUpdates(Order order) {
+        Set<String> participants = orderItemMapper.selectList(
+                        new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()))
+                .stream().map(OrderItem::getUserId).collect(Collectors.toCollection(LinkedHashSet::new));
+        for (String userId : participants) {
+            try {
+                User user = userMapper.selectById(userId);
+                long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
+                notificationService.sendBalanceUpdate(userId, available, "結算：" + order.getOrderName());
+            } catch (Exception e) {
+                log.error("Failed to push balance update for user={} after settling order {}",
+                        userId, order.getOrderId(), e);
+            }
+        }
+    }
+
+    /** 推播只是盡力送達:通知已經保存,推播失敗不能反過來影響結算結果 */
+    private void pushQuietly(List<Notification> notifications) {
+        for (Notification notification : notifications) {
+            try {
+                notificationService.pushSettlement(notification);
+            } catch (Exception e) {
+                log.error("Failed to push notification {} to user {}",
+                        notification.getNotificationId(), notification.getUserId(), e);
+            }
         }
     }
 }
