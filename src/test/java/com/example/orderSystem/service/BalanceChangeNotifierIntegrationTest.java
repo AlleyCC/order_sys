@@ -62,7 +62,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
         String userId = seedUser(userMapper, "notify", 1000);
         String orderId = seedOpenOrder(orderMapper, userId);
 
-        orderService.createUserOrder(createReq(orderId), userId);
+        orderService.createUserOrder(createReq(orderId), userId, null);
 
         verify(notificationService).sendBalanceUpdate(eq(userId), eq(1000L - UNIT_PRICE), anyString());
     }
@@ -74,7 +74,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
         String orderId = seedOpenOrder(orderMapper, userId);
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            orderService.createUserOrder(createReq(orderId), userId);
+            orderService.createUserOrder(createReq(orderId), userId, null);
             verifyNoInteractions(notificationService);
         });
 
@@ -88,7 +88,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
         String orderId = seedOpenOrder(orderMapper, userId);
 
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            orderService.createUserOrder(createReq(orderId), userId);
+            orderService.createUserOrder(createReq(orderId), userId, null);
             status.setRollbackOnly();
         });
 
@@ -101,7 +101,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     void deleteItemPushesBalance() {
         String userId = seedUser(userMapper, "notify", 1000);
         String orderId = seedOpenOrder(orderMapper, userId);
-        orderService.createUserOrder(createReq(orderId), userId);
+        orderService.createUserOrder(createReq(orderId), userId, null);
         clearInvocations(notificationService);
 
         orderService.deleteUserOrder(deleteReq(orderId, itemIdOf(orderId, userId)), userId);
@@ -114,7 +114,7 @@ class BalanceChangeNotifierIntegrationTest extends AbstractIntegrationTest {
     void deleteItemSucceedsWhenPushFails() {
         String userId = seedUser(userMapper, "notify", 1000);
         String orderId = seedOpenOrder(orderMapper, userId);
-        orderService.createUserOrder(createReq(orderId), userId);
+        orderService.createUserOrder(createReq(orderId), userId, null);
         doThrow(new RedisConnectionFailureException("Redis 斷線"))
                 .when(notificationService).sendBalanceUpdate(anyString(), anyLong(), anyString());
 
