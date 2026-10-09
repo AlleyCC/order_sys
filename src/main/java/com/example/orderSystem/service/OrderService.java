@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.example.orderSystem.dto.request.CreateOrderItemRequest;
 import com.example.orderSystem.dto.request.CreateOrderRequest;
 import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
+import com.example.orderSystem.dto.response.CreateOrderItemResult;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
 import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
@@ -16,6 +17,7 @@ import com.example.orderSystem.scheduler.RedisSettlementQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +26,7 @@ import org.springframework.util.StringUtils;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -34,6 +37,8 @@ public class OrderService {
     private static final DateTimeFormatter DATETIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private static final Set<String> RESCUE_ROLES = Set.of("SUPER_ADMIN", "CUSTOMER_SERVICE");
+
+    private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
 
     private final StoreMapper storeMapper;
     private final OrderMapper orderMapper;
@@ -46,6 +51,8 @@ public class OrderService {
     private final ApplicationEventPublisher eventPublisher;
     private final RbacCacheService rbacCacheService;
     private final RoleMapper roleMapper;
+    private final SettlementNotificationRecorder notificationRecorder;
+    private final OrderItemIdempotencyKeyMapper idempotencyKeyMapper;
 
     public IPage<Store> getAllShops(String storeName, int page, int size) {
         String name = StringUtils.hasText(storeName) ? escapeLike(storeName.trim()) : null;
@@ -145,14 +152,44 @@ public class OrderService {
     /**
      * 隔離等級刻意降到 READ_COMMITTED。
      * MySQL 預設是 REPEATABLE READ:交易內第一個「一般 SELECT」就決定了快照,
-     * 之後所有一般 SELECT 都讀那個快照。本方法在鎖之前已經 select 過 order/menu,
-     * 快照因此早就固定 —— 就算 selectForUpdate 拿到了鎖(它是當前讀、看得到最新),
+     * 之後所有一般 SELECT 都讀那個快照。只要鎖之前有任何一般 SELECT,
+     * 快照就早於對手的 commit —— 就算 selectForUpdate 拿到了鎖(它是當前讀、看得到最新),
      * 後面 getFrozenAmount 這個一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項,
-     * 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交,鎖才真的有效。
+     * 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交,不必依賴「鎖一定是第一句」。
      */
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public void createUserOrder(CreateOrderItemRequest request, String userId) {
-        // 1. Validate order
+    public CreateOrderItemResult createUserOrder(CreateOrderItemRequest request, String userId,
+                                                 String idempotencyKey) {
+        if (idempotencyKey != null && !IDEMPOTENCY_KEY_PATTERN.matcher(idempotencyKey).matches()) {
+            throw new BadRequestException("Idempotency-Key 格式錯誤:限 1 到 64 個英數字、- 或 _");
+        }
+
+        // 1. 第一步就鎖 users 這一行,同一使用者的所有下單在這裡排隊。
+        //    凍結是 order_items 上的 SUM、沒有實體可鎖,所以改鎖 users:
+        //    鎖的對象不必是要保護的資料,只要是所有寫入者都必經的同一個點。
+        //    這把鎖同時讓下一步 Idempotency-Key 的「先查再寫」不會有競爭。
+        User user = userMapper.selectForUpdate(userId);
+        if (user == null) {
+            throw new ResourceNotFoundException("使用者不存在");
+        }
+
+        // 2. Idempotency-Key:同一使用者的請求都在上面的 users 鎖排隊,
+        //    所以這裡「先查、沒有才在最後寫入」不會有兩個請求同時查到「沒有」。
+        //    - 查到 → 回放第一次的結果,不再驗證、不寫入、不推播
+        //    - 查不到 → 照常下單,寫入品項後才寫入 key;下單失敗時交易回滾,不留 key
+        //    寫入 key 的路徑都必須先鎖 users,否則這個「先查」就是 check-then-act。
+        //    (唯一索引仍在,作為最後一道防線。)
+        if (idempotencyKey != null) {
+            OrderItemIdempotencyKey existing = idempotencyKeyMapper.selectOne(
+                    new LambdaQueryWrapper<OrderItemIdempotencyKey>()
+                            .eq(OrderItemIdempotencyKey::getUserId, userId)
+                            .eq(OrderItemIdempotencyKey::getIdempotencyKey, idempotencyKey));
+            if (existing != null) {
+                return new CreateOrderItemResult(existing.getItemId(), true);
+            }
+        }
+
+        // 3. Validate order
         Order order = orderMapper.selectById(request.getOrderId());
         if (order == null) {
             throw new ResourceNotFoundException("該筆訂單不存在");
@@ -164,7 +201,7 @@ public class OrderService {
             throw new IllegalStateException("訂單已過截止時間");
         }
 
-        // 2. Validate menu
+        // 4. Validate menu
         Menu menu = menuMapper.selectById(request.getMenuId());
         if (menu == null) {
             throw new ResourceNotFoundException("菜單品項不存在");
@@ -173,21 +210,15 @@ public class OrderService {
             throw new IllegalStateException("該品項已下架");
         }
 
-        // 3. Check available balance —— 必須鎖住後才讀,否則是 check-then-act:
+        // 5. Check available balance —— 必須在鎖住之後才讀,否則是 check-then-act:
         //    兩個併發請求會讀到同一份可用餘額而雙雙放行,凍結因此超過實際餘額。
-        //    凍結是 order_items 上的 SUM、沒有實體可鎖,所以改鎖 users 這一行:
-        //    鎖的對象不必是要保護的資料,只要是所有寫入者都必經的同一個點。
         int orderAmount = menu.getUnitPrice() * request.getQuantity();
-        User user = userMapper.selectForUpdate(userId);
-        if (user == null) {
-            throw new ResourceNotFoundException("使用者不存在");
-        }
         long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
         if (available < orderAmount) {
             throw new InsufficientBalanceException("餘額不足");
         }
 
-        // 4. Insert order item with snapshot
+        // 6. Insert order item with snapshot
         OrderItem item = new OrderItem();
         item.setOrderId(request.getOrderId());
         item.setUserId(userId);
@@ -197,10 +228,19 @@ public class OrderService {
         item.setQuantity(request.getQuantity());
         orderItemMapper.insert(item);
 
+        if (idempotencyKey != null) {
+            OrderItemIdempotencyKey keyRecord = new OrderItemIdempotencyKey();
+            keyRecord.setUserId(userId);
+            keyRecord.setIdempotencyKey(idempotencyKey);
+            keyRecord.setItemId(item.getItemId());
+            idempotencyKeyMapper.insert(keyRecord);
+        }
+
         // 通知延到交易 commit 之後才送(見 BalanceChangeNotifier):
         // 交易若回滾,使用者不該收到「下單成功」;也讓上面那把行鎖不必等推播。
         eventPublisher.publishEvent(new BalanceChangedEvent(userId,
                 "下單：" + menu.getProductName() + " x" + request.getQuantity()));
+        return new CreateOrderItemResult(item.getItemId(), false);
     }
 
     public void deleteUserOrder(DeleteOrderItemRequest request, String userId) {
@@ -287,14 +327,11 @@ public class OrderService {
             order.setStatus(OrderStatus.CLOSED);
         }
 
-        // Attempt payment
+        // Attempt payment(通知的寫入與推播都在 payOrder 內,手動結算走同一條路)
         try {
             payOrder(orderId);
-            // Notify all users of successful settlement
-            notifySettlementResult(order, true);
         } catch (InsufficientBalanceException e) {
             log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
-            notifySettlementResult(order, false);
         } catch (ConflictException e) {
             // 同時有人(例如團主手動 pay_order)先結算完了,這邊不用再做
             log.info("Order {} was settled concurrently, skipping", orderId);
@@ -314,48 +351,24 @@ public class OrderService {
         Set<String> recipients = new LinkedHashSet<>();
         recipients.add(order.getCreatedBy());
         recipients.addAll(roleMapper.selectUserIdsByRoleNames(RESCUE_ROLES));
+        // 呼叫端是 at-least-once(失敗會下一輪重送):每則寫入本身是原子的,
+        // 重送時已存在的由唯一鍵擋下並略過推播 —— 上次可能已推過,沒推過的收件人查未讀也看得到
         for (String userId : recipients) {
-            notificationService.sendSettlementAbandoned(userId, orderId, order.getOrderName());
-        }
-    }
-
-    /**
-     * 結算結果已經寫進 DB 之後才呼叫,所以這裡的任何失敗都不能往外丟:
-     * 往外丟會被 consumer 當成結算失敗重排,重跑時訂單已是 SETTLED / FAILED 而直接跳過,通知照樣送不出去。
-     */
-    private void notifySettlementResult(Order order, boolean success) {
-        Map<String, Long> userTotals;
-        try {
-            List<OrderItem> items = orderItemMapper.selectList(
-                    new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()));
-            userTotals = items.stream()
-                    .collect(Collectors.groupingBy(
-                            OrderItem::getUserId, Collectors.summingLong(OrderItem::getSubtotal)));
-        } catch (Exception e) {
-            log.error("Failed to load participants for settlement notification, order={}", order.getOrderId(), e);
-            return;
-        }
-
-        for (String userId : userTotals.keySet()) {
+            Notification notification;
             try {
-                if (success) {
-                    User user = userMapper.selectById(userId);
-                    notificationService.sendSettlementSuccess(userId, order.getOrderId(),
-                            order.getOrderName(), userTotals.get(userId).intValue(), user.getBalance());
-                } else {
-                    notificationService.sendSettlementFailed(userId, order.getOrderId(), order.getOrderName());
-                }
-            } catch (Exception e) {
-                // 一個人失敗不影響其他人
-                log.error("Failed to notify settlement result for user={}, order={}",
-                        userId, order.getOrderId(), e);
+                notification = notificationRecorder.recordAbandoned(order, userId);
+            } catch (DuplicateKeyException e) {
+                log.info("Abandoned notification for order {} already recorded for user {}", orderId, userId);
+                continue;
             }
+            pushQuietly(List.of(notification));
         }
     }
 
     /**
      * Pay order: CAS debit each user, write transactions, set SETTLED.
-     * On insufficient balance: set FAILED (outside transaction) then throw.
+     * On insufficient balance: set FAILED (separate transaction) then throw.
+     * 兩種結果的通知都在各自的交易內寫入,這裡在 commit 之後才推播。
      */
     public void payOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
@@ -372,13 +385,53 @@ public class OrderService {
             throw new IllegalStateException("訂單狀態不允許結算");
         }
 
+        List<Notification> written;
         try {
-            paymentService.executePayment(order);
+            written = paymentService.executePayment(order);
         } catch (InsufficientBalanceException e) {
-            // Set FAILED outside the rolled-back transaction
-            order.setStatus(OrderStatus.FAILED);
-            orderMapper.updateById(order);
+            // 扣款交易已回滾;在另一個交易把訂單轉為 FAILED 並寫入失敗通知
+            pushQuietly(paymentService.markFailed(order, e.getShortUserIds()));
             throw e;
+        }
+        pushQuietly(written);
+        pushBalanceUpdates(order);
+    }
+
+    /**
+     * 扣款已 commit:每位參與者的餘額變了(凍結也解除了),各推一次最新可用餘額。
+     * 任何失敗都不能往外丟 —— 往外丟會被 consumer 當成結算失敗重排。
+     */
+    private void pushBalanceUpdates(Order order) {
+        Set<String> participants;
+        try {
+            participants = orderItemMapper.selectList(
+                            new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, order.getOrderId()))
+                    .stream().map(OrderItem::getUserId).collect(Collectors.toCollection(LinkedHashSet::new));
+        } catch (Exception e) {
+            log.error("Failed to load participants for balance push, order={}", order.getOrderId(), e);
+            return;
+        }
+        for (String userId : participants) {
+            try {
+                User user = userMapper.selectById(userId);
+                long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
+                notificationService.sendBalanceUpdate(userId, available, "結算：" + order.getOrderName());
+            } catch (Exception e) {
+                log.error("Failed to push balance update for user={} after settling order {}",
+                        userId, order.getOrderId(), e);
+            }
+        }
+    }
+
+    /** 推播只是盡力送達:通知已經保存,推播失敗不能反過來影響結算結果 */
+    private void pushQuietly(List<Notification> notifications) {
+        for (Notification notification : notifications) {
+            try {
+                notificationService.pushSettlement(notification);
+            } catch (Exception e) {
+                log.error("Failed to push notification {} to user {}",
+                        notification.getNotificationId(), notification.getUserId(), e);
+            }
         }
     }
 }

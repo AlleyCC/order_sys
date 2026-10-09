@@ -5,6 +5,7 @@ import com.example.orderSystem.dto.request.CreateOrderItemRequest;
 import com.example.orderSystem.dto.request.CreateOrderRequest;
 import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.dto.request.PageLimits;
+import com.example.orderSystem.dto.response.CreateOrderItemResult;
 import com.example.orderSystem.dto.response.OrderDetailResponse;
 import com.example.orderSystem.dto.response.PageResponse;
 import com.example.orderSystem.dto.response.StoreResponse;
@@ -77,11 +78,17 @@ public class OrderController {
 
     @PostMapping("/order/create_user_order")
     @Operation(summary = "加入已開啟的團購訂單（下單品項）")
-    public ResponseEntity<Map<String, String>> createUserOrder(
+    public ResponseEntity<Map<String, Object>> createUserOrder(
             @Valid @RequestBody CreateOrderItemRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @AuthenticationPrincipal String userId) {
-        orderService.createUserOrder(request, userId);
-        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("message", "下單成功"));
+        CreateOrderItemResult result = orderService.createUserOrder(request, userId, idempotencyKey);
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.CREATED);
+        if (result.replayed()) {
+            // 回放與第一次的 body 相同,靠這個 header 讓 client 分辨「這次沒有寫入」
+            response.header("Idempotent-Replayed", "true");
+        }
+        return response.body(Map.of("message", "下單成功", "itemId", result.itemId()));
     }
 
     @PostMapping("/order/delete_user_order")

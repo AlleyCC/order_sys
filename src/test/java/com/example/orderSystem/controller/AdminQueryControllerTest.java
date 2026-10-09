@@ -2,12 +2,15 @@ package com.example.orderSystem.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.Role;
 import com.example.orderSystem.entity.Transaction;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.entity.UserRole;
+import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.RechargeStatus;
 import com.example.orderSystem.enums.TradeType;
+import com.example.orderSystem.mapper.OrderMapper;
 import com.example.orderSystem.mapper.RechargeOrderMapper;
 import com.example.orderSystem.mapper.RoleMapper;
 import com.example.orderSystem.mapper.TransactionMapper;
@@ -31,6 +34,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
+import static com.example.orderSystem.support.TestFixtures.insertOrder;
 import static com.example.orderSystem.support.TestFixtures.seedUser;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -53,8 +57,10 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
     @Autowired RechargeOrderMapper rechargeOrderMapper;
     @Autowired RechargeService rechargeService;
     @Autowired MockPayChannel mockPayChannel;
+    @Autowired OrderMapper orderMapper;
 
     private static final String STAFF = "fx-adminquery-staff";
+    private static final String ORDER_PREFIX = "ord-adminq-";
 
     private String adminToken;
     private String staffToken;
@@ -69,6 +75,21 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
     @AfterEach
     void restoreRoles() {
         setStaffRoles();
+        orderMapper.delete(new QueryWrapper<Order>().likeRight("order_id", ORDER_PREFIX));
+    }
+
+    /**
+     * 建立一張指定狀態、指定建立時間的訂單(與 STAFF 無關)。
+     * 建立時間設在未來,確保它比共用資料庫裡其他測試留下的訂單都新,不受測試執行順序影響。
+     */
+    private String seedOrderCreatedAt(OrderStatus status, LocalDateTime createdAt) {
+        String orderId = insertOrder(orderMapper, ORDER_PREFIX + UUID.randomUUID().toString().substring(0, 8),
+                "bob", status);
+        Order update = new Order();
+        update.setOrderId(orderId);
+        update.setCreatedAt(createdAt);
+        orderMapper.updateById(update);
+        return orderId;
     }
 
     private void ensureUser(String userId) {
@@ -103,13 +124,29 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
         @DisplayName("客服 → 200,回傳不受參與範圍限制的全系統訂單")
         void customerServiceSeesAllOrders() throws Exception {
             setStaffRoles("CUSTOMER_SERVICE");
+            // 已結算、STAFF 也沒參與的訂單 —— 客服仍看得到
+            String settled = seedOrderCreatedAt(OrderStatus.SETTLED, LocalDateTime.now().plusDays(1));
 
             mockMvc.perform(get("/admin/orders/get_all_orders")
                             .header("Authorization", "Bearer " + staffToken))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.records", hasSize(greaterThanOrEqualTo(2))))
                     .andExpect(jsonPath("$.total").value(greaterThanOrEqualTo(2)))
-                    .andExpect(jsonPath("$.records[?(@.orderId == 'ord-001')]", hasSize(1)));
+                    .andExpect(jsonPath("$.records[?(@.orderId == '" + settled + "')]", hasSize(1)));
+        }
+
+        @Test
+        @DisplayName("新的訂單在前:建立時間較晚者排在前面")
+        void newestFirst() throws Exception {
+            setStaffRoles("CUSTOMER_SERVICE");
+            String older = seedOrderCreatedAt(OrderStatus.SETTLED, LocalDateTime.now().plusDays(2));
+            String newer = seedOrderCreatedAt(OrderStatus.OPEN, LocalDateTime.now().plusDays(3));
+
+            mockMvc.perform(get("/admin/orders/get_all_orders")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.records[0].orderId").value(newer))
+                    .andExpect(jsonPath("$.records[1].orderId").value(older));
         }
 
         @Test

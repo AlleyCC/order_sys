@@ -33,13 +33,21 @@
         JOIN stores s ON o.store_id = s.store_id
     </sql>
 
+    <!-- 分頁查詢必須有完整的排序,否則每次查詢的順序不保證相同,翻頁時會重複或遺漏。
+         新的訂單在前;created_at 只到秒,同秒再以 order_id 決定先後。 -->
+    <sql id="orderSummaryOrderBy">
+        ORDER BY o.created_at DESC, o.order_id
+    </sql>
+
     <select id="getOpenOrdersWithStore" resultType="java.util.Map">
         <include refid="orderSummarySelect"/>
         WHERE o.status = 'OPEN'
+        <include refid="orderSummaryOrderBy"/>
     </select>
 
     <select id="getAllOrdersWithStore" resultType="java.util.Map">
         <include refid="orderSummarySelect"/>
+        <include refid="orderSummaryOrderBy"/>
     </select>
 
     <select id="getOrderDetail" resultMap="orderDetailMap">
