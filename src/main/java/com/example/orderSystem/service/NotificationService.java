@@ -12,11 +12,10 @@ public class NotificationService {
 
     private final NotificationPublisher publisher;
 
-    public void sendBalanceUpdate(String userId, long availableBalance, String reason) {
-        publisher.publish(userId, "/queue/balance", new BalanceMessage(availableBalance, reason));
+    public void sendBalanceChanged(String userId, String reason) {
+        publisher.publish(userId, "/queue/balance", new BalanceMessage(reason));
     }
 
-    /** 推播一則已保存的結算通知;只負責盡力送達,收件人離線時由查詢未讀補齊 */
     public void pushSettlement(Notification notification) {
         publisher.publish(notification.getUserId(), "/queue/notification",
                 SettlementMessage.builder()

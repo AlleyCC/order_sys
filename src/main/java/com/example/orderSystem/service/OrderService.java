@@ -126,8 +126,6 @@ public class OrderService {
         );
     }
 
-    // ========== Write APIs ==========
-
     public Map<String, String> createOrder(CreateOrderRequest request, String userId) {
         Store store = storeMapper.selectById(request.getStoreId());
         if (store == null) {
@@ -143,20 +141,11 @@ public class OrderService {
         order.setDeadline(LocalDateTime.parse(request.getDeadline(), DATETIME_FMT));
         orderMapper.insert(order);
 
-        // Schedule auto-settlement at deadline
         settlementQueue.add(order.getOrderId(), order.getDeadline());
 
         return Map.of("orderId", order.getOrderId(), "storeId", order.getStoreId());
     }
 
-    /**
-     * 隔離等級刻意降到 READ_COMMITTED。
-     * MySQL 預設是 REPEATABLE READ:交易內第一個「一般 SELECT」就決定了快照,
-     * 之後所有一般 SELECT 都讀那個快照。只要鎖之前有任何一般 SELECT,
-     * 快照就早於對手的 commit —— 就算 selectForUpdate 拿到了鎖(它是當前讀、看得到最新),
-     * 後面 getFrozenAmount 這個一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項,
-     * 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交,不必依賴「鎖一定是第一句」。
-     */
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public CreateOrderItemResult createUserOrder(CreateOrderItemRequest request, String userId,
                                                  String idempotencyKey) {
@@ -164,21 +153,11 @@ public class OrderService {
             throw new BadRequestException("Idempotency-Key 格式錯誤:限 1 到 64 個英數字、- 或 _");
         }
 
-        // 1. 第一步就鎖 users 這一行,同一使用者的所有下單在這裡排隊。
-        //    凍結是 order_items 上的 SUM、沒有實體可鎖,所以改鎖 users:
-        //    鎖的對象不必是要保護的資料,只要是所有寫入者都必經的同一個點。
-        //    這把鎖同時讓下一步 Idempotency-Key 的「先查再寫」不會有競爭。
         User user = userMapper.selectForUpdate(userId);
         if (user == null) {
             throw new ResourceNotFoundException("使用者不存在");
         }
 
-        // 2. Idempotency-Key:同一使用者的請求都在上面的 users 鎖排隊,
-        //    所以這裡「先查、沒有才在最後寫入」不會有兩個請求同時查到「沒有」。
-        //    - 查到 → 回放第一次的結果,不再驗證、不寫入、不推播
-        //    - 查不到 → 照常下單,寫入品項後才寫入 key;下單失敗時交易回滾,不留 key
-        //    寫入 key 的路徑都必須先鎖 users,否則這個「先查」就是 check-then-act。
-        //    (唯一索引仍在,作為最後一道防線。)
         if (idempotencyKey != null) {
             OrderItemIdempotencyKey existing = idempotencyKeyMapper.selectOne(
                     new LambdaQueryWrapper<OrderItemIdempotencyKey>()
@@ -189,7 +168,6 @@ public class OrderService {
             }
         }
 
-        // 3. Validate order
         Order order = orderMapper.selectById(request.getOrderId());
         if (order == null) {
             throw new ResourceNotFoundException("該筆訂單不存在");
@@ -201,7 +179,6 @@ public class OrderService {
             throw new IllegalStateException("訂單已過截止時間");
         }
 
-        // 4. Validate menu
         Menu menu = menuMapper.selectById(request.getMenuId());
         if (menu == null) {
             throw new ResourceNotFoundException("菜單品項不存在");
@@ -210,15 +187,12 @@ public class OrderService {
             throw new IllegalStateException("該品項已下架");
         }
 
-        // 5. Check available balance —— 必須在鎖住之後才讀,否則是 check-then-act:
-        //    兩個併發請求會讀到同一份可用餘額而雙雙放行,凍結因此超過實際餘額。
         int orderAmount = menu.getUnitPrice() * request.getQuantity();
         long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
         if (available < orderAmount) {
             throw new InsufficientBalanceException("餘額不足");
         }
 
-        // 6. Insert order item with snapshot
         OrderItem item = new OrderItem();
         item.setOrderId(request.getOrderId());
         item.setUserId(userId);
@@ -236,8 +210,6 @@ public class OrderService {
             idempotencyKeyMapper.insert(keyRecord);
         }
 
-        // 通知延到交易 commit 之後才送(見 BalanceChangeNotifier):
-        // 交易若回滾,使用者不該收到「下單成功」;也讓上面那把行鎖不必等推播。
         eventPublisher.publishEvent(new BalanceChangedEvent(userId,
                 "下單：" + menu.getProductName() + " x" + request.getQuantity()));
         return new CreateOrderItemResult(item.getItemId(), false);
@@ -256,20 +228,17 @@ public class OrderService {
             if (!order.getCreatedBy().equals(userId) && !canRescue(userId)) {
                 throw new ForbiddenException("無權限刪除此訂單");
             }
-            // 條件式寫入:讀到 OPEN 之後,截止結算可能已經把狀態改掉了
             if (orderMapper.updateStatusIfIn(order.getOrderId(), OrderStatus.CANCELLED,
                     List.of(OrderStatus.OPEN)) == 0) {
                 throw new ConflictException("訂單狀態已變更，無法刪除");
             }
             settlementQueue.remove(order.getOrderId());
         } else {
-            // Delete single item
             int itemId = Integer.parseInt(request.getItemId());
             OrderItem item = orderItemMapper.selectById(itemId);
             if (item == null) {
                 throw new ResourceNotFoundException("品項不存在");
             }
-            // Permission check
             boolean isOwner = order.getCreatedBy().equals(userId);
             boolean isItemOwner = item.getUserId().equals(userId);
             if (!isOwner && !isItemOwner && !canRescue(userId)) {
@@ -277,8 +246,6 @@ public class OrderService {
             }
             orderItemMapper.deleteById(itemId);
 
-            // 通知品項主人(不一定是執行刪除的人)。這裡沒有交易、刪除已經 commit,
-            // 交給 BalanceChangeNotifier 立即處理,推播失敗才不會讓已成功的刪除回錯誤
             eventPublisher.publishEvent(new BalanceChangedEvent(item.getUserId(),
                     "刪除品項：" + item.getProductName()));
         }
@@ -296,7 +263,6 @@ public class OrderService {
             throw new IllegalStateException("僅 OPEN 或 CLOSED 狀態的訂單可取消");
         }
 
-        // 條件式寫入:讀到 CLOSED 之後可能已被結算,不能把 SETTLED 蓋成 CANCELLED
         if (orderMapper.updateStatusIfIn(orderId, OrderStatus.CANCELLED,
                 List.of(OrderStatus.OPEN, OrderStatus.CLOSED)) == 0) {
             throw new ConflictException("訂單狀態已變更，無法取消");
@@ -304,11 +270,6 @@ public class OrderService {
         settlementQueue.remove(orderId);
     }
 
-    /**
-     * Called by DelayQueue consumer when deadline arrives.
-     * OPEN → CLOSED → attempt payOrder.
-     * CLOSED 代表上次扣款中途出錯(狀態已改、扣款已 rollback),重試時直接接著扣款。
-     */
     public void settleOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
         if (order == null
@@ -318,7 +279,6 @@ public class OrderService {
             return;
         }
 
-        // OPEN → CLOSED(條件式寫入:讀到 OPEN 之後團主可能剛取消,不能把 CANCELLED 蓋回來)
         if (order.getStatus() == OrderStatus.OPEN) {
             if (orderMapper.updateStatusIfIn(orderId, OrderStatus.CLOSED, List.of(OrderStatus.OPEN)) == 0) {
                 log.info("Order {} changed status before closing, skipping settlement", orderId);
@@ -327,21 +287,15 @@ public class OrderService {
             order.setStatus(OrderStatus.CLOSED);
         }
 
-        // Attempt payment(通知的寫入與推播都在 payOrder 內,手動結算走同一條路)
         try {
             payOrder(orderId);
         } catch (InsufficientBalanceException e) {
             log.warn("Settlement failed for order {}: {}", orderId, e.getMessage());
         } catch (ConflictException e) {
-            // 同時有人(例如團主手動 pay_order)先結算完了,這邊不用再做
             log.info("Order {} was settled concurrently, skipping", orderId);
         }
     }
 
-    /**
-     * 自動重試次數用完時呼叫:訂單停在 OPEN 或 CLOSED,通知團主與能救援訂單的管理員手動結算。
-     * 訂單若已到終態(例如結算成功後、確認前機器當掉,又被回收到次數用完),就不需要人工處理。
-     */
     public void notifySettlementAbandoned(String orderId) {
         Order order = orderMapper.selectById(orderId);
         if (order == null
@@ -351,8 +305,6 @@ public class OrderService {
         Set<String> recipients = new LinkedHashSet<>();
         recipients.add(order.getCreatedBy());
         recipients.addAll(roleMapper.selectUserIdsByRoleNames(RESCUE_ROLES));
-        // 呼叫端是 at-least-once(失敗會下一輪重送):每則寫入本身是原子的,
-        // 重送時已存在的由唯一鍵擋下並略過推播 —— 上次可能已推過,沒推過的收件人查未讀也看得到
         for (String userId : recipients) {
             Notification notification;
             try {
@@ -365,11 +317,6 @@ public class OrderService {
         }
     }
 
-    /**
-     * Pay order: CAS debit each user, write transactions, set SETTLED.
-     * On insufficient balance: set FAILED (separate transaction) then throw.
-     * 兩種結果的通知都在各自的交易內寫入,這裡在 commit 之後才推播。
-     */
     public void payOrder(String orderId) {
         Order order = orderMapper.selectById(orderId);
         if (order == null) {
@@ -389,7 +336,6 @@ public class OrderService {
         try {
             written = paymentService.executePayment(order);
         } catch (InsufficientBalanceException e) {
-            // 扣款交易已回滾;在另一個交易把訂單轉為 FAILED 並寫入失敗通知
             pushQuietly(paymentService.markFailed(order, e.getShortUserIds()));
             throw e;
         }
@@ -397,10 +343,6 @@ public class OrderService {
         pushBalanceUpdates(order);
     }
 
-    /**
-     * 扣款已 commit:每位參與者的餘額變了(凍結也解除了),各推一次最新可用餘額。
-     * 任何失敗都不能往外丟 —— 往外丟會被 consumer 當成結算失敗重排。
-     */
     private void pushBalanceUpdates(Order order) {
         Set<String> participants;
         try {
@@ -412,18 +354,10 @@ public class OrderService {
             return;
         }
         for (String userId : participants) {
-            try {
-                User user = userMapper.selectById(userId);
-                long available = user.getBalance() - orderItemMapper.getFrozenAmount(userId);
-                notificationService.sendBalanceUpdate(userId, available, "結算：" + order.getOrderName());
-            } catch (Exception e) {
-                log.error("Failed to push balance update for user={} after settling order {}",
-                        userId, order.getOrderId(), e);
-            }
+            eventPublisher.publishEvent(new BalanceChangedEvent(userId, "結算：" + order.getOrderName()));
         }
     }
 
-    /** 推播只是盡力送達:通知已經保存,推播失敗不能反過來影響結算結果 */
     private void pushQuietly(List<Notification> notifications) {
         for (Notification notification : notifications) {
             try {

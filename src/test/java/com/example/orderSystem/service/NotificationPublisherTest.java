@@ -32,7 +32,7 @@ class NotificationPublisherTest {
     @Test
     @DisplayName("publish → 發送到 websocket:notifications channel，內容為 envelope JSON")
     void publishesEnvelopeJson() throws Exception {
-        BalanceMessage msg = new BalanceMessage(4500, "下單");
+        BalanceMessage msg = new BalanceMessage("下單");
 
         publisher.publish("alice", "/queue/balance", msg);
 
@@ -42,7 +42,7 @@ class NotificationPublisherTest {
         String json = jsonCaptor.getValue();
         assertThat(json).contains("\"userId\":\"alice\"");
         assertThat(json).contains("\"destination\":\"/queue/balance\"");
-        assertThat(json).contains("\"availableBalance\":4500");
+        assertThat(json).contains("\"type\":\"BALANCE_CHANGED\"");
         assertThat(json).contains("\"reason\":\"下單\"");
     }
 }
