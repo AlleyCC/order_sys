@@ -2,10 +2,13 @@ package com.example.orderSystem.support;
 
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.OrderItem;
+import com.example.orderSystem.entity.RechargeOrder;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.enums.OrderStatus;
+import com.example.orderSystem.enums.RechargeStatus;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
+import com.example.orderSystem.mapper.RechargeOrderMapper;
 import com.example.orderSystem.mapper.UserMapper;
 
 import java.time.LocalDateTime;
@@ -69,6 +72,26 @@ public final class TestFixtures {
         order.setDeadline(deadline);
         orderMapper.insert(order);
         return orderId;
+    }
+
+    /** 建立一筆儲值單(只寫本地,通道不知道這筆),過期時間為現在起 15 分鐘 */
+    public static String seedRechargeOrder(RechargeOrderMapper rechargeOrderMapper, String userId,
+                                           int amount, RechargeStatus status) {
+        return insertRechargeOrder(rechargeOrderMapper, UUID.randomUUID().toString(), userId, amount, status);
+    }
+
+    public static String insertRechargeOrder(RechargeOrderMapper rechargeOrderMapper, String rechargeId,
+                                             String userId, int amount, RechargeStatus status) {
+        RechargeOrder order = new RechargeOrder();
+        order.setRechargeId(rechargeId);
+        order.setUserId(userId);
+        order.setAmount(amount);
+        order.setStatus(status);
+        // created_at 明確寫入:容器的 DB 時區不一定和 JVM 相同,不能依賴 DB 預設值
+        order.setCreatedAt(LocalDateTime.now());
+        order.setExpireAt(LocalDateTime.now().plusMinutes(15));
+        rechargeOrderMapper.insert(order);
+        return rechargeId;
     }
 
     /** 在訂單裡加一個數量 1 的品項,回傳 itemId */

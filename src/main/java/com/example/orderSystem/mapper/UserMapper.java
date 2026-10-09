@@ -10,6 +10,8 @@ public interface UserMapper extends BaseMapper<User> {
 
     int casDebit(@Param("userId") String userId, @Param("amount") long amount);
 
+    int creditBalance(@Param("userId") String userId, @Param("amount") long amount);
+
     /**
      * 以行鎖讀取使用者。凍結金額是 order_items 上的 SUM,沒有實體可鎖,
      * 因此改鎖 users 這一行 —— 讓同一使用者的所有下單在此排隊。

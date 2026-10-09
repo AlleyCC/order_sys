@@ -73,11 +73,14 @@ class RbacAdminControllerTest extends AbstractIntegrationTest {
     private void grantResources(String roleName, String... patterns) {
         Long rid = roleId(roleName);
         roleResourceMapper.delete(new QueryWrapper<RoleResource>().eq("role_id", rid));
+        // 同一個 pattern 可能登記了多個 method(例如 /admin/transactions/** 的 GET 與 POST),全部授權回去
         for (String pattern : patterns) {
-            RoleResource rr = new RoleResource();
-            rr.setRoleId(rid);
-            rr.setResourceId(resourceId(pattern));
-            roleResourceMapper.insert(rr);
+            for (Resource resource : resourceMapper.selectList(new QueryWrapper<Resource>().eq("url_pattern", pattern))) {
+                RoleResource rr = new RoleResource();
+                rr.setRoleId(rid);
+                rr.setResourceId(resource.getResourceId());
+                roleResourceMapper.insert(rr);
+            }
         }
         rbacCacheService.evictRoleResources(roleName);
     }

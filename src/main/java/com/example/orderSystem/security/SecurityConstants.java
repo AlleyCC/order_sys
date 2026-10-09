@@ -11,6 +11,8 @@ public final class SecurityConstants {
             "/login/logout",
             "/auth/refresh",
             "/ws/**",
+            "/pay/notify/**",           // 付款通道回呼:沒有我們的 token,內容不採信、一律回頭查單
+            "/mock-channel/**",         // 模擬通道:扮演外部通道,只在 app.pay.channel=mock 時存在
             "/swagger-ui.html",
             "/swagger-ui/**",
             "/v3/api-docs",

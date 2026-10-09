@@ -16,6 +16,7 @@ public class Transaction {
     private String transactionId;
     private String userId;
     private String orderId;
+    private String rechargeId;
     private Integer amount;
     private Integer closingBalance;
     private TradeType type;
