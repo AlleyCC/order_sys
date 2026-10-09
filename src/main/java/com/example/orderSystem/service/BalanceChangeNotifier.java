@@ -18,6 +18,11 @@ import org.springframework.transaction.event.TransactionalEventListener;
  * 2. createUserOrder 在交易期間持有 users 的行鎖,推播是外部 I/O,
  *    不該把它算進持鎖時間裡。
  *
+ * fallbackExecution:發布時沒有交易(例如 deleteUserOrder),寫入當下就已 commit,立即處理即可;
+ * 不開的話事件會被直接丟掉,使用者收不到任何推播。
+ *
+ * 所有餘額推播都經過這裡,推播失敗只記錄、不往外丟的規則也只需要寫在這一處。
+ *
  * 直接依賴 mapper 而非 OrderService,避免 OrderService → event → listener → OrderService
  * 的循環依賴。
  */
@@ -30,7 +35,7 @@ public class BalanceChangeNotifier {
     private final OrderItemMapper orderItemMapper;
     private final NotificationService notificationService;
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void onBalanceChanged(BalanceChangedEvent event) {
         try {
             User user = userMapper.selectById(event.userId());

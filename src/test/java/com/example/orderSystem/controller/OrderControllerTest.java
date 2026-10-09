@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.orderSystem.entity.Notification;
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.OrderItem;
+import com.example.orderSystem.entity.OrderItemIdempotencyKey;
 import com.example.orderSystem.entity.Role;
 import com.example.orderSystem.entity.Store;
 import com.example.orderSystem.entity.User;
@@ -11,6 +12,7 @@ import com.example.orderSystem.entity.UserRole;
 import com.example.orderSystem.enums.NotificationType;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.mapper.NotificationMapper;
+import com.example.orderSystem.mapper.OrderItemIdempotencyKeyMapper;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
 import com.example.orderSystem.mapper.RoleMapper;
@@ -27,6 +29,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +43,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import static com.example.orderSystem.support.TestFixtures.insertItem;
+import static com.example.orderSystem.support.TestFixtures.insertOrder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -81,6 +86,9 @@ class OrderControllerTest extends AbstractIntegrationTest {
 
     @Autowired
     private NotificationMapper notificationMapper;
+
+    @Autowired
+    private OrderItemIdempotencyKeyMapper idempotencyKeyMapper;
 
     private String aliceToken;
     private String bobToken;
@@ -141,27 +149,12 @@ class OrderControllerTest extends AbstractIntegrationTest {
     }
 
     private String seedOpenOrder(String createdBy) {
-        Order order = new Order();
-        order.setOrderId(RESCUE_PREFIX + UUID.randomUUID().toString().substring(0, 8));
-        order.setStoreId("store001");
-        order.setCreatedBy(createdBy);
-        order.setOrderName("救援情境測試團");
-        order.setStatus(OrderStatus.OPEN);
-        order.setDeadline(LocalDateTime.now().plusHours(1));
-        orderMapper.insert(order);
-        return order.getOrderId();
+        return insertOrder(orderMapper, RESCUE_PREFIX + UUID.randomUUID().toString().substring(0, 8),
+                createdBy, OrderStatus.OPEN);
     }
 
     private Integer seedItem(String orderId, String userId) {
-        OrderItem item = new OrderItem();
-        item.setOrderId(orderId);
-        item.setUserId(userId);
-        item.setMenuId(1);
-        item.setProductName("救援情境品項");
-        item.setUnitPrice(50);
-        item.setQuantity(1);
-        orderItemMapper.insert(item);
-        return item.getItemId();
+        return insertItem(orderItemMapper, orderId, userId, 50);
     }
 
     // ========== GET /order/get_all_shops ==========
@@ -334,6 +327,10 @@ class OrderControllerTest extends AbstractIntegrationTest {
         @Test
         @DisplayName("預設分頁 → 200, 回傳 records + total + page 資訊")
         void returnsPagedOrders() throws Exception {
+            // 自己建立需要的 OPEN 訂單,不依賴其他測試在共用資料庫留下的資料
+            seedOpenOrder("bob");
+            seedOpenOrder("bob");
+
             mockMvc.perform(get("/order/get_all_orders")
                             .header("Authorization", "Bearer " + aliceToken))
                     .andExpect(status().isOk())
@@ -347,8 +344,34 @@ class OrderControllerTest extends AbstractIntegrationTest {
         }
 
         @Test
+        @DisplayName("新的訂單在前:建立時間較晚者排在前面")
+        void newestFirst() throws Exception {
+            // 建立時間設在未來,確保比共用資料庫裡其他測試留下的訂單都新
+            String older = seedOpenOrderCreatedAt(LocalDateTime.now().plusDays(2));
+            String newer = seedOpenOrderCreatedAt(LocalDateTime.now().plusDays(3));
+
+            mockMvc.perform(get("/order/get_all_orders")
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.records[0].orderId").value(newer))
+                    .andExpect(jsonPath("$.records[1].orderId").value(older));
+        }
+
+        private String seedOpenOrderCreatedAt(LocalDateTime createdAt) {
+            String orderId = seedOpenOrder("bob");
+            Order update = new Order();
+            update.setOrderId(orderId);
+            update.setCreatedAt(createdAt);
+            orderMapper.updateById(update);
+            return orderId;
+        }
+
+        @Test
         @DisplayName("指定 page=1, size=1 → 只回傳 1 筆")
         void customPageSize() throws Exception {
+            seedOpenOrder("bob");
+            seedOpenOrder("bob");
+
             mockMvc.perform(get("/order/get_all_orders")
                             .param("page", "1")
                             .param("size", "1")
@@ -636,6 +659,266 @@ class OrderControllerTest extends AbstractIntegrationTest {
                             .content("{\"orderId\":\"ord-002\",\"menuId\":5,\"quantity\":0}"))
                     .andExpect(status().isBadRequest());
         }
+
+        @Test
+        @DisplayName("回應帶 itemId,值等於 DB 新寫入的品項")
+        void responseContainsItemId() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            int itemId = itemIdOf(placeOrder(IDEM_USER, orderId, null)
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.message").value("下單成功")));
+
+            List<OrderItem> items = itemsOf(orderId, IDEM_USER);
+            assertThat(items).hasSize(1);
+            assertThat(itemId).isEqualTo(items.get(0).getItemId());
+        }
+
+        @Test
+        @DisplayName("不帶 key、相同 body 連送兩次 → 寫入兩筆,itemId 不同,皆非回放")
+        void withoutKeyEachRequestCreatesItem() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            int first = itemIdOf(placeOrder(IDEM_USER, orderId, null)
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER)));
+            int second = itemIdOf(placeOrder(IDEM_USER, orderId, null)
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER)));
+
+            assertThat(first).isNotEqualTo(second);
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(2);
+        }
+    }
+
+    // ========== POST /order/create_user_order + Idempotency-Key ==========
+
+    private static final String IDEM_USER = "fx-idem-user";
+    private static final String IDEM_OTHER_USER = "fx-idem-other";
+    private static final String REPLAYED_HEADER = "Idempotent-Replayed";
+
+    private void setBalance(String userId, long balance) {
+        ensureUser(userId);
+        User user = new User();
+        user.setUserId(userId);
+        user.setBalance(balance);
+        userMapper.updateById(user);
+    }
+
+    /** 以 menuId 1(招牌鍋貼,70 元)× 1 下單;key 為 null 時不帶 header */
+    private ResultActions placeOrder(
+            String userId, String orderId, String idempotencyKey) throws Exception {
+        return placeOrder(userId, orderId, 1, idempotencyKey);
+    }
+
+    private ResultActions placeOrder(
+            String userId, String orderId, int menuId, String idempotencyKey) throws Exception {
+        var request = post("/order/create_user_order")
+                .header("Authorization", "Bearer " + jwtUtils.generateAccessToken(userId))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"orderId\":\"" + orderId + "\",\"menuId\":" + menuId + ",\"quantity\":1}");
+        if (idempotencyKey != null) {
+            request.header("Idempotency-Key", idempotencyKey);
+        }
+        return mockMvc.perform(request);
+    }
+
+    private int itemIdOf(ResultActions result) throws Exception {
+        return readJson(result.andReturn().getResponse().getContentAsString()).get("itemId").asInt();
+    }
+
+    private JsonNode readJson(String json) {
+        try {
+            return objectMapper.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private List<OrderItem> itemsOf(String orderId, String userId) {
+        return orderItemMapper.selectList(new QueryWrapper<OrderItem>()
+                .eq("order_id", orderId).eq("user_id", userId));
+    }
+
+    private List<OrderItemIdempotencyKey> keysOf(String userId) {
+        return idempotencyKeyMapper.selectList(new QueryWrapper<OrderItemIdempotencyKey>().eq("user_id", userId));
+    }
+
+    @Nested
+    @DisplayName("POST /order/create_user_order + Idempotency-Key")
+    class CreateUserOrderIdempotency {
+
+        // ---- key 格式 ----
+
+        @Test
+        @DisplayName("key 長度 65 → 400,不寫入品項")
+        void keyTooLong() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            placeOrder(IDEM_USER, orderId, "k".repeat(65)).andExpect(status().isBadRequest());
+
+            assertThat(itemsOf(orderId, IDEM_USER)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("key 含空白 → 400,不寫入品項")
+        void keyWithInvalidCharacter() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            placeOrder(IDEM_USER, orderId, "abc def").andExpect(status().isBadRequest());
+
+            assertThat(itemsOf(orderId, IDEM_USER)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("key 長度 64 與 UUID 皆可正常下單")
+        void validKeys() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            placeOrder(IDEM_USER, orderId, "k".repeat(64)).andExpect(status().isCreated());
+            placeOrder(IDEM_USER, orderId, UUID.randomUUID().toString()).andExpect(status().isCreated());
+
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(2);
+        }
+
+        // ---- 保存與回放 ----
+
+        @Test
+        @DisplayName("同一 key 送兩次 → 第二次回放同一 itemId,只寫入一筆")
+        void replaySameKey() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            int first = itemIdOf(placeOrder(IDEM_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER)));
+            int second = itemIdOf(placeOrder(IDEM_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.message").value("下單成功"))
+                    .andExpect(header().string(REPLAYED_HEADER, "true")));
+
+            assertThat(second).isEqualTo(first);
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("成功後訂單已截止,同 key 重送 → 仍回放 201,不回截止錯誤")
+        void replayAfterDeadline() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+            int first = itemIdOf(placeOrder(IDEM_USER, orderId, "k1").andExpect(status().isCreated()));
+
+            Order expired = new Order();
+            expired.setOrderId(orderId);
+            expired.setDeadline(LocalDateTime.now().minusMinutes(1));
+            orderMapper.updateById(expired);
+
+            int second = itemIdOf(placeOrder(IDEM_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().string(REPLAYED_HEADER, "true")));
+            assertThat(second).isEqualTo(first);
+        }
+
+        @Test
+        @DisplayName("成功後品項被刪除,同 key 重送 → 回放原 itemId,不寫入新品項")
+        void replayAfterItemDeleted() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+            int first = itemIdOf(placeOrder(IDEM_USER, orderId, "k1").andExpect(status().isCreated()));
+
+            orderItemMapper.deleteById(first);
+
+            int second = itemIdOf(placeOrder(IDEM_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().string(REPLAYED_HEADER, "true")));
+            assertThat(second).isEqualTo(first);
+            assertThat(itemsOf(orderId, IDEM_USER)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("同 key 但 body 不同 → 回放第一次的 itemId,不寫入新品項")
+        void replayIgnoresDifferentBody() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+            int first = itemIdOf(placeOrder(IDEM_USER, orderId, 1, "k1").andExpect(status().isCreated()));
+
+            int second = itemIdOf(placeOrder(IDEM_USER, orderId, 2, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().string(REPLAYED_HEADER, "true")));
+
+            assertThat(second).isEqualTo(first);
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("key 區分大小寫:abc 之後送 ABC → 寫入新品項")
+        void keyIsCaseSensitive() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+
+            int lower = itemIdOf(placeOrder(IDEM_USER, orderId, "abc").andExpect(status().isCreated()));
+            int upper = itemIdOf(placeOrder(IDEM_USER, orderId, "ABC")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER)));
+
+            assertThat(upper).isNotEqualTo(lower);
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(2);
+        }
+
+        @Test
+        @DisplayName("不同使用者用同一 key → 各自寫入,互不回放")
+        void keyIsScopedPerUser() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 1000L);
+            setBalance(IDEM_OTHER_USER, 1000L);
+
+            int mine = itemIdOf(placeOrder(IDEM_USER, orderId, "k1").andExpect(status().isCreated()));
+            int theirs = itemIdOf(placeOrder(IDEM_OTHER_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER)));
+
+            assertThat(theirs).isNotEqualTo(mine);
+            assertThat(itemsOf(orderId, IDEM_OTHER_USER)).hasSize(1);
+        }
+
+        // ---- 失敗不保存 ----
+
+        @Test
+        @DisplayName("餘額不足 → 400 且不留 key;儲值後同 key 重試 → 正常寫入,非回放")
+        void failureIsNotRecorded() throws Exception {
+            String orderId = seedOpenOrder("bob");
+            setBalance(IDEM_USER, 0L);
+
+            placeOrder(IDEM_USER, orderId, "k1").andExpect(status().isBadRequest());
+            assertThat(keysOf(IDEM_USER)).isEmpty();
+
+            setBalance(IDEM_USER, 1000L);
+            placeOrder(IDEM_USER, orderId, "k1")
+                    .andExpect(status().isCreated())
+                    .andExpect(header().doesNotExist(REPLAYED_HEADER));
+            assertThat(itemsOf(orderId, IDEM_USER)).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("訂單不存在 → 404 且不留 key")
+        void notFoundIsNotRecorded() throws Exception {
+            setBalance(IDEM_USER, 1000L);
+
+            placeOrder(IDEM_USER, "nonexistent", "k1").andExpect(status().isNotFound());
+
+            assertThat(keysOf(IDEM_USER)).isEmpty();
+        }
+    }
+
+    @AfterEach
+    void cleanUpIdempotencyFixtures() {
+        idempotencyKeyMapper.delete(new QueryWrapper<OrderItemIdempotencyKey>()
+                .in("user_id", IDEM_USER, IDEM_OTHER_USER));
     }
 
     // ========== POST /order/delete_user_order ==========

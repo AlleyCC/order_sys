@@ -7,6 +7,7 @@ import com.example.orderSystem.dto.request.DeleteOrderItemRequest;
 import com.example.orderSystem.entity.*;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.enums.TradeType;
+import com.example.orderSystem.event.BalanceChangedEvent;
 import com.example.orderSystem.exception.*;
 import com.example.orderSystem.mapper.*;
 import com.example.orderSystem.scheduler.RedisSettlementQueue;
@@ -22,6 +23,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -180,7 +183,7 @@ class OrderServiceTest {
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
             when(orderItemMapper.insert((OrderItem) any())).thenReturn(1);
 
-            assertThatCode(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 2), "alice"))
+            assertThatCode(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 2), "alice", null))
                     .doesNotThrowAnyException();
             verify(orderItemMapper).insert((OrderItem) any());
         }
@@ -188,9 +191,10 @@ class OrderServiceTest {
         @Test
         @DisplayName("訂單不存在 → ResourceNotFoundException")
         void orderNotFound() {
+            when(userMapper.selectForUpdate("alice")).thenReturn(createUser("alice", 5000L));
             when(orderMapper.selectById("bad")).thenReturn(null);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("bad", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("bad", 1, 1), "alice", null))
                     .isInstanceOf(ResourceNotFoundException.class)
                     .hasMessage("該筆訂單不存在");
         }
@@ -199,9 +203,10 @@ class OrderServiceTest {
         @DisplayName("訂單非 OPEN → BadRequestException")
         void orderNotOpen() {
             Order order = createOrder("ord-001", "bob", OrderStatus.CLOSED);
+            when(userMapper.selectForUpdate("alice")).thenReturn(createUser("alice", 5000L));
             when(orderMapper.selectById("ord-001")).thenReturn(order);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice", null))
                     .isInstanceOf(IllegalStateException.class);
         }
 
@@ -218,7 +223,7 @@ class OrderServiceTest {
             when(userMapper.selectForUpdate("alice")).thenReturn(user);
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice", null))
                     .isInstanceOf(InsufficientBalanceException.class);
         }
 
@@ -246,12 +251,12 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
-            when(userMapper.selectById("alice")).thenReturn(createUser("alice", 5000L));
-            when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "alice"))
                     .doesNotThrowAnyException();
+            verify(eventPublisher).publishEvent(
+                    new BalanceChangedEvent("alice", "刪除品項：" + item.getProductName()));
         }
 
         @Test
@@ -278,12 +283,13 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(orderItemMapper.selectById(1)).thenReturn(item);
             when(orderItemMapper.deleteById(1)).thenReturn(1);
-            when(userMapper.selectById("charlie")).thenReturn(createUser("charlie", 3000L));
-            when(orderItemMapper.getFrozenAmount("charlie")).thenReturn(0L);
 
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "rescuer"))
                     .doesNotThrowAnyException();
+            // 餘額變動通知的是品項主人,不是執行刪除的救援者
+            verify(eventPublisher).publishEvent(
+                    new BalanceChangedEvent("charlie", "刪除品項：" + item.getProductName()));
         }
 
         @Test
@@ -613,6 +619,51 @@ class OrderServiceTest {
             assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
             verify(paymentService, never()).markFailed(any(), any());
             verify(notificationService, never()).pushSettlement(any());
+        }
+
+        @Test
+        @DisplayName("扣款已 commit、推播失敗 → 不往外丟(否則被當成結算失敗重排),也不中斷其他人的通知")
+        void successNotificationFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(paymentService.executePayment(order))
+                    .thenReturn(List.of(notification("alice"), notification("bob")));
+            // 第一則推播失敗、第二則成功;兩個人都要被嘗試通知
+            doThrow(new RedisConnectionFailureException("Redis 斷線"))
+                    .doNothing()
+                    .when(notificationService).pushSettlement(any());
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService, times(2)).pushSettlement(any());
+        }
+
+        @Test
+        @DisplayName("餘額不足已標記 FAILED、推播失敗 → 同樣不往外丟,也不中斷其他人的通知")
+        void failedNotificationFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            doThrow(new InsufficientBalanceException(List.of("bob")))
+                    .when(paymentService).executePayment(order);
+            when(paymentService.markFailed(order, List.of("bob")))
+                    .thenReturn(List.of(notification("alice"), notification("bob")));
+            doThrow(new RedisConnectionFailureException("Redis 斷線"))
+                    .doNothing()
+                    .when(notificationService).pushSettlement(any());
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(notificationService, times(2)).pushSettlement(any());
+        }
+
+        @Test
+        @DisplayName("扣款已 commit、查詢要推餘額給誰時 DB 出錯 → 一樣不往外丟")
+        void participantLookupFailureIsNotASettlementFailure() {
+            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
+            when(orderMapper.selectById("ord-001")).thenReturn(order);
+            when(orderItemMapper.selectList(any()))
+                    .thenThrow(new DataAccessResourceFailureException("DB 斷線"));
+
+            assertThatCode(() -> orderService.settleOrder("ord-001")).doesNotThrowAnyException();
+            verify(paymentService).executePayment(order);
         }
     }
 

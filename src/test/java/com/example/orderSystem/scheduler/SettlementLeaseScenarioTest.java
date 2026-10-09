@@ -1,10 +1,7 @@
 package com.example.orderSystem.scheduler;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.example.orderSystem.entity.Order;
-import com.example.orderSystem.entity.OrderItem;
 import com.example.orderSystem.entity.Transaction;
-import com.example.orderSystem.entity.User;
 import com.example.orderSystem.enums.OrderStatus;
 import com.example.orderSystem.mapper.OrderItemMapper;
 import com.example.orderSystem.mapper.OrderMapper;
@@ -20,8 +17,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.LocalDateTime;
-import java.util.UUID;
 
+import static com.example.orderSystem.support.TestFixtures.insertItem;
+import static com.example.orderSystem.support.TestFixtures.seedOrder;
+import static com.example.orderSystem.support.TestFixtures.seedUser;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -30,8 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SettlementLeaseScenarioTest extends AbstractIntegrationTest {
 
-    private static final int MENU_ID = 1;        // 招牌鍋貼(10入), unit_price = 70
-    private static final int UNIT_PRICE = 70;
+    private static final int UNIT_PRICE = 70;    // 招牌鍋貼(10入)
 
     @Autowired
     private RedisSettlementQueue settlementQueue;
@@ -59,7 +57,7 @@ class SettlementLeaseScenarioTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("實例 A 認領後消失 → 租約到期被回收 → 實例 B 重新認領並完成結算,只扣一次款")
     void claimerDisappearsThenAnotherInstanceSettles() {
-        String userId = seedUser(1000);
+        String userId = seedUser(userMapper, "lease", 1000);
         String orderId = seedOpenOrderPastDeadline(userId);
         long t = System.currentTimeMillis();
 
@@ -95,37 +93,12 @@ class SettlementLeaseScenarioTest extends AbstractIntegrationTest {
 
     // ========== helpers ==========
 
-    private String seedUser(long balance) {
-        User user = new User();
-        user.setUserId("lease-" + UUID.randomUUID().toString().substring(0, 8));
-        user.setUserName("Lease Tester");
-        user.setPassword("$2a$10$XPMeuJdtYd.vXoarK3BdxOpBip8zRR5Ql3/cORtUn/N9G1pfnIAQW");
-        user.setBalance(balance);
-        userMapper.insert(user);
-        return user.getUserId();
-    }
-
     /** 截止時間已過、仍是 OPEN 的訂單,並排進結算佇列(與建立訂單時的排程相同) */
     private String seedOpenOrderPastDeadline(String userId) {
-        Order order = new Order();
-        order.setOrderId(UUID.randomUUID().toString());
-        order.setStoreId("store001");
-        order.setCreatedBy(userId);
-        order.setOrderName("租約測試團");
-        order.setStatus(OrderStatus.OPEN);
-        order.setDeadline(LocalDateTime.now().minusMinutes(1));
-        orderMapper.insert(order);
-
-        OrderItem item = new OrderItem();
-        item.setOrderId(order.getOrderId());
-        item.setUserId(userId);
-        item.setMenuId(MENU_ID);
-        item.setProductName("招牌鍋貼(10入)");
-        item.setUnitPrice(UNIT_PRICE);
-        item.setQuantity(1);
-        orderItemMapper.insert(item);
-
-        settlementQueue.add(order.getOrderId(), order.getDeadline());
-        return order.getOrderId();
+        LocalDateTime deadline = LocalDateTime.now().minusMinutes(1);
+        String orderId = seedOrder(orderMapper, userId, OrderStatus.OPEN, deadline);
+        insertItem(orderItemMapper, orderId, userId, UNIT_PRICE);
+        settlementQueue.add(orderId, deadline);
+        return orderId;
     }
 }

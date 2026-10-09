@@ -43,7 +43,7 @@ Client (REST + WebSocket)
   │                ▼
   │            [MySQL 8.0] ── paypool 資料庫
   │
-  └── WS ───→ [WebSocket (STOMP)] ── 即時訂單同步 / 聊天 / 通知
+  └── WS ───→ [WebSocket (STOMP)] ── 即時餘額同步 / 結算通知
                    │
                    ▼
                [DelayQueue] ── deadline 到期觸發自動結算
@@ -419,6 +419,8 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 那些屬於訂單明細,只有參與者讀得到。
 需要檢視不限狀態的全系統訂單請改用 `GET /admin/orders/get_all_orders`(限客服)。
 
+兩個訂單列表(本端點與 `GET /admin/orders/get_all_orders`)皆依建立時間由新到舊排序,同秒再依 `orderId` 排序,確保翻頁時不重複、不遺漏。
+
 **Request:** `page` / `size`,見 3.1「分頁參數」
 
 **Response 200 OK:**
@@ -562,6 +564,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 | 位置 | 欄位 | 型別 | 必填 | 說明 |
 |------|------|------|------|------|
 | Header | Authorization | String | Y | `Bearer <JWT>` |
+| Header | Idempotency-Key | String | N | 一次下單意圖的識別碼(建議 UUID),重送時沿用同一個值;1–64 個英數字、`-`、`_`,區分大小寫 |
 | Body | orderId | String | Y | 訂單 ID |
 | Body | menuId | int | Y | 菜單項目 ID (FK → menus) |
 | Body | quantity | int | Y | 數量 |
@@ -569,26 +572,31 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 **Response 201 Created:**
 
 ```json
-{ "message": "下單成功" }
+{ "message": "下單成功", "itemId": 123 }
 ```
+
+同一 `Idempotency-Key` 的重送回傳第一次的 `itemId`,並附回應 header `Idempotent-Replayed: true`;第一次下單不帶此 header。
 
 **Response 404 Not Found / 400 Bad Request:**
 
 ```json
 { "status": 404, "detail": "該筆訂單不存在" }
 { "status": 400, "detail": "餘額不足" }
+{ "status": 400, "detail": "Idempotency-Key 格式錯誤:限 1 到 64 個英數字、- 或 _" }
 ```
 
 **業務邏輯:**
-1. 確認訂單存在且狀態為 OPEN
-2. 確認訂單未過截止時間 (`deadline`)，已過期則拒絕
-3. 查詢 `menus` 取得 `product_name` 和 `unit_price`，驗證品項存在且供應中
-4. 以 `SELECT ... FOR UPDATE` 鎖住該使用者的 `users` 那一行，序列化同一使用者的併發下單（見 7.2「併發下單的凍結不變式」）
-5. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN、CLOSED 及 FAILED 訂單的未結金額（必須在取得鎖之後才讀）
-6. 餘額不足則拒絕
-7. 寫入 `order_items`（含品名與單價快照）
-8. 同一使用者可重複點相同品項（例如多訂幾份）
-9. 交易 commit 後，透過 WebSocket 推送當事人的可用餘額更新
+1. 帶 `Idempotency-Key` 時先驗證格式,不合法則拒絕
+2. 以 `SELECT ... FOR UPDATE` 鎖住該使用者的 `users` 那一行,序列化同一使用者的併發下單(見 7.2「併發下單的凍結不變式」)
+3. 帶 `Idempotency-Key` 時查詢 `order_item_idempotency_keys`;若同一使用者已有同一 key 的記錄,直接回傳該記錄的 `itemId`(回放),不執行以下步驟、不推播(見 7.2「下單的 Idempotency-Key」)
+4. 確認訂單存在且狀態為 OPEN
+5. 確認訂單未過截止時間 (`deadline`),已過期則拒絕
+6. 查詢 `menus` 取得 `product_name` 和 `unit_price`,驗證品項存在且供應中
+7. 計算使用者可用餘額 = 最新帳戶餘額 - 所有 OPEN、CLOSED 及 FAILED 訂單的未結金額(必須在取得鎖之後才讀)
+8. 餘額不足則拒絕
+9. 寫入 `order_items`(含品名與單價快照);帶 key 時接著寫入 key 記錄(含新品項的 `item_id`)
+10. 同一使用者可重複點相同品項(例如多訂幾份);不帶 key、或帶不同 key 時各自寫入
+11. 交易 commit 後,透過 WebSocket 推送當事人的可用餘額更新
 
 ---
 
@@ -818,7 +826,8 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 users (1) ──┬──< orders (N)          [created_by → user_id]
             ├──< order_items (N)     [user_id → user_id]
             ├──< transactions (N)    [user_id → user_id]
-            └──< notifications (N)   [user_id → user_id]
+            ├──< notifications (N)   [user_id → user_id]
+            └──< order_item_idempotency_keys (N)  [user_id → user_id, CASCADE]
 
 stores (1) ──┬──< orders (N)         [store_id → store_id]
              └──< menus (N)          [store_id → store_id]
@@ -916,7 +925,7 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 
 索引: `(user_id, created_at DESC)` 複合索引，加速交易紀錄查詢。
 
-#### notifications - 站內通知(V10)
+#### notifications - 站內通知(V11)
 
 | 欄位 | 型別 | PK | NOT NULL | 說明 |
 |------|------|----|----------|------|
@@ -932,6 +941,18 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 約束與索引:
 - `UNIQUE(user_id, dedup_key)`:同一收件人、同一個去重鍵只能有一則。MySQL 的 UNIQUE 允許多個 NULL,所以不需要去重的通知(例如每次結算失敗)不受影響
 - `(user_id, read_at, created_at)`:查未讀時 `user_id = ? AND read_at IS NULL` 之後,`created_at` 已排好序
+
+#### order_item_idempotency_keys - 下單的 Idempotency-Key 記錄
+
+| 欄位 | 型別 | PK | NOT NULL | 說明 |
+|------|------|----|----------|------|
+| id | BIGINT AUTO_INCREMENT | Y | Y | |
+| user_id | VARCHAR(20) | | Y | FK → users (CASCADE) |
+| idempotency_key | VARCHAR(64) | | Y | client 帶來的 key,`ascii_bin`(區分大小寫) |
+| item_id | INT | | | 第一次寫入的品項,與品項同一交易寫入。不設 FK,品項被刪除後仍保留 |
+| created_at | DATETIME | | Y | 建立時間 (DEFAULT CURRENT_TIMESTAMP),清理依據 |
+
+索引: `UNIQUE (user_id, idempotency_key)`;`(created_at)` 供清理使用。保存至少 24 小時(見 7.2「下單的 Idempotency-Key」)。
 
 ---
 
@@ -1041,7 +1062,6 @@ src/main/java/com/example/orderSystem/
 │   │   └── TransactionResponse.java
 │   └── websocket/                       # WebSocket 訊息 DTO
 │       ├── BalanceMessage.java
-│       ├── ChatMessage.java
 │       └── SettlementMessage.java
 ├── enums/
 │   ├── OrderStatus.java
@@ -1057,8 +1077,6 @@ src/main/java/com/example/orderSystem/
 │   ├── OrderSettlementTask.java         # DelayQueue 任務 (implements Delayed)
 │   ├── OrderSettlementConsumer.java     # 背景執行緒，消費到期任務
 │   └── OrderSettlementQueue.java        # DelayQueue 管理 (新增/移除/重啟恢復)
-├── websocket/
-│   └── ChatController.java              # 團購聊天室 (STOMP handler)
 └── util/
     ├── JwtUtils.java                    # JWT 簽發/驗證
     ├── BcryptUtils.java                 # BCrypt 雜湊
@@ -1124,8 +1142,7 @@ status=OPEN      檢查餘額                status=CLOSED       SETTLED / FAILE
             │
             │  deadline 前可進行：
             ├── create_user_order (下單，WS 即時同步)
-            ├── delete_user_order (刪除品項)
-            └── 團購聊天 (WS)
+            └── delete_user_order (刪除品項)
 ```
 
 ### 7.2 帳戶餘額定義
@@ -1180,11 +1197,22 @@ SELECT * FROM users WHERE user_id = ? FOR UPDATE   -- UserMapper.selectForUpdate
 
 **隔離等級必須降到 READ_COMMITTED**
 
-`createUserOrder` 標註 `@Transactional(isolation = Isolation.READ_COMMITTED)`。MySQL 預設的 REPEATABLE READ 下，交易內第一個「一般 SELECT」（此處是查訂單的 `selectById`）就固定了快照；`SELECT ... FOR UPDATE` 雖是當前讀、拿得到鎖，但後續計算凍結金額的一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項 —— 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交資料，鎖才真的生效。
+`createUserOrder` 標註 `@Transactional(isolation = Isolation.READ_COMMITTED)`。MySQL 預設的 REPEATABLE READ 下，交易內第一個「一般 SELECT」就固定了快照；只要鎖之前有任何一般 SELECT，`SELECT ... FOR UPDATE` 雖是當前讀、拿得到鎖，但後續計算凍結金額的一般 SELECT 仍會讀到舊快照、看不見對手剛寫入的品項 —— 鎖等於白加。READ_COMMITTED 下每個 SELECT 都讀最新已提交資料，鎖才真的生效。
 
 **餘額通知延到 commit 之後才送**
 
 下單成功的 WebSocket 推送改為發佈 `BalanceChangedEvent`，由 `BalanceChangeNotifier` 以 `@TransactionalEventListener(AFTER_COMMIT)` 送出。兩個理由：交易若回滾，使用者不該收到「下單成功」；推播也不該被算進持鎖時間。
+
+#### 下單的 Idempotency-Key
+
+請求送達、回應卻遺失時,client 只能重送;伺服器若把重送當成新的下單,就會多寫一筆品項、結算時多扣一次款。client 為每一次下單意圖產生一個 `Idempotency-Key`,重送沿用同一個值,伺服器以 `(user_id, key)` 保存第一次**成功**的結果,重送時回傳同一個 `itemId`。
+
+- **key 與品項同一交易寫入**:下單失敗時一起回滾,不留記錄,client 用同一個 key 重試會重新執行。
+- **回放不重新驗證**:命中已提交的 key 就直接回傳,不再檢查訂單狀態、截止時間與餘額;品項之後被刪除也一樣回傳原 `itemId`。
+- **同一 key 併發**:後到者在 `users` 行鎖上等待;先到者成功就回放,失敗就重新執行,不回 `409`。
+- **先鎖 users,再「先查、最後寫入」key**:同一使用者的請求都在 `users` 行鎖排隊,所以查詢 key 與最後寫入 key 之間不會有同一使用者的其他請求插進來,「先查再寫」不構成 check-then-act;`UNIQUE (user_id, idempotency_key)` 仍保留作為最後一道防線。任何寫入 key 的路徑都必須先鎖 `users`。
+- **為什麼不能用唯一索引當鎖(先插入 key 再鎖 users)**:key 表的 `user_id` 有 FK,`INSERT` 會先對 `users` 那一列加共享鎖做 FK 檢查,之後才檢查唯一鍵。在 key 上等待的請求因此帶著 `users` 的共享鎖,擋住先到者接下來的 `FOR UPDATE`,兩邊互等成死鎖(實作時以確定性實驗重現)。
+- **保存至少 24 小時**:`IdempotencyKeyCleanupJob` 每小時整點分批刪除超過 24 小時的記錄,所以一筆記錄實際存在 24 到 25 小時;被刪除後同一 key 視為新的下單。排程由 `SchedulingConfig` 啟用,不受自動結算的開關 `app.scheduler.enabled` 影響。
 
 ### 7.3 自動結算流程 (DelayQueue + @Transactional)
 
@@ -1284,7 +1312,6 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 |-------------|------|---------|---------|
 | `/user/queue/balance` | 帳戶餘額同步 | 當事人 | 下單、改單、刪除品項、扣款後 |
 | `/user/queue/notification` | 系統通知 | 當事人 | 扣款結果、訂單狀態變更 |
-| `/topic/order/{orderId}/chat` | 團購聊天室 | 同訂單所有人 | 用戶發送訊息 |
 
 > 訂單品項的異動（新增/刪除）不廣播給所有人，僅推送當事人的可用餘額更新。訂單明細由前端呼叫 `GET /order/get_order_detail` 主動查詢。
 
@@ -1311,19 +1338,6 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 ```
 
 `result` 依通知類型對應為 `SETTLED`／`FAILED`／`ERROR`（見「列舉定義 NotificationType」）。`notificationId` 讓前端和 `get_unread_notifications` 的結果去重。
-
-**聊天訊息格式：**
-
-```json
-{
-  "type": "CHAT",
-  "orderId": "ord-002",
-  "userId": "alice",
-  "userName": "Alice Chen",
-  "message": "有人要加點嗎？湊個 $250 免運",
-  "timestamp": "2025-04-15 14:30:00"
-}
-```
 
 ### 7.5 結算通知:站內通知 + 盡力推播
 
@@ -1399,6 +1413,15 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 | 餘額只夠一筆：併發下兩筆同一張單 | 只有一筆成功，凍結不超過餘額 |
 | 餘額夠兩筆：併發下兩筆 | 兩筆都成功（鎖不得誤殺） |
 | 同一人同時在兩張不同的團下單 | 凍結不變式仍成立 |
+| 回應 | 201,body 含新品項的 `itemId` |
+| 帶 key 重送 | 201,同一 `itemId`,`Idempotent-Replayed: true`,不新增品項 |
+| 帶 key 成功後訂單截止 / 品項被刪 / body 不同,再重送 | 仍回放第一次的 `itemId` |
+| key 格式不合法(超過 64 字、含空白) | 400,不寫入 |
+| key 大小寫不同、不同使用者用同一 key | 各自寫入,非回放 |
+| 帶 key 但下單失敗(餘額不足、訂單不存在) | 不留 key;同 key 重試會重新執行 |
+| 同 key 兩個請求同時抵達 | 只寫入一筆,兩者 `itemId` 相同,恰一個是回放 |
+| 先到者持有 key 時 rollback / commit | 後到者重新執行 / 回放先到者的 `itemId` |
+| key 記錄超過 24 小時被清理後再用同一 key | 視為新的下單 |
 
 #### delete_user_order
 
@@ -1528,7 +1551,6 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 | 扣款失敗後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=FAILED) |
 | 自動重試用完後通知 | 團主與管理員的 `/user/queue/notification` 收到 SETTLEMENT (result=ERROR) |
 | 其他用戶下單不會收到通知 | 非當事人不收到 BALANCE_UPDATED |
-| 聊天訊息發送與接收 | `/topic/order/{orderId}/chat` 收到 CHAT |
 | 未認證的 WebSocket 連線 | 拒絕連線 |
 
 ### 8.7 Mapper 整合測試重點
