@@ -417,6 +417,8 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 那些屬於訂單明細,只有參與者讀得到。
 需要檢視不限狀態的全系統訂單請改用 `GET /admin/orders/get_all_orders`(限客服)。
 
+兩個訂單列表(本端點與 `GET /admin/orders/get_all_orders`)皆依建立時間由新到舊排序,同秒再依 `orderId` 排序,確保翻頁時不重複、不遺漏。
+
 **Request:** `page` / `size`,見 3.1「分頁參數」
 
 **Response 200 OK:**
