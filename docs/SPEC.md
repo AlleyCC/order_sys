@@ -719,7 +719,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 7. 有任何人不足 → rollback 所有扣款（第 2 步搶下的狀態也一起退回）；再開**另一個交易**，條件式把狀態改為 FAILED（`status IN ('CLOSED','FAILED')`）並寫入失敗通知。條件不成立（已被別人結算）就不改狀態、不寫通知
 8. 全部成功 → 在**同一個交易**寫入結算成功通知，commit，狀態即為第 2 步寫入的 SETTLED
 9. commit 之後，逐則透過 WebSocket 推送剛寫入的通知 (`/user/queue/notification`)；推播失敗只記 log，不影響結果（見 7.5）
-10. 扣款成功時，再對每位參與者推送最新可用餘額 (`/user/queue/balance`，reason =「結算：{訂單名稱}」)；同樣盡力送達
+10. 扣款成功時，再對每位參與者推送餘額變動信號 (`/user/queue/balance`，reason =「結算：{訂單名稱}」)；同樣盡力送達
 
 ---
 
@@ -1310,20 +1310,21 @@ UPDATE orders SET status = ? WHERE order_id = ? AND status IN (...)
 
 | 頻道 (Topic) | 用途 | 推送對象 | 觸發時機 |
 |-------------|------|---------|---------|
-| `/user/queue/balance` | 帳戶餘額同步 | 當事人 | 下單、改單、刪除品項、扣款後 |
+| `/user/queue/balance` | 帳戶餘額變動信號 | 當事人 | 下單、改單、刪除品項、扣款後 |
 | `/user/queue/notification` | 系統通知 | 當事人 | 扣款結果、訂單狀態變更 |
 
-> 訂單品項的異動（新增/刪除）不廣播給所有人，僅推送當事人的可用餘額更新。訂單明細由前端呼叫 `GET /order/get_order_detail` 主動查詢。
+> 訂單品項的異動（新增/刪除）不廣播給所有人，僅推送當事人的餘額變動信號。訂單明細由前端呼叫 `GET /order/get_order_detail` 主動查詢。
 
-**餘額同步訊息格式：**
+**餘額變動信號格式：**
 
 ```json
 {
-  "type": "BALANCE_UPDATED",
-  "availableBalance": 4840,
+  "type": "BALANCE_CHANGED",
   "reason": "下單：珍珠奶茶(大) x1"
 }
 ```
+
+只通知「餘額變了」，不帶數字。前端收到後呼叫 `GET /order/get_user_account` 取得最新的 `balance` 與 `availableBalance`。Redis Pub/Sub 不保證送達順序，若訊息帶數字，較舊的值可能晚到而蓋掉較新的值；重新查詢拿到的一定是 DB 當下的值。所有餘額推播都經由 `BalanceChangedEvent` → `BalanceChangeNotifier` 送出。
 
 **結算通知訊息格式：**（成功、失敗、自動重試用完共用；內容即站內通知的 `content`）
 
@@ -1545,12 +1546,13 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 
 | 測試案例 | 預期結果 |
 |---------|---------|
-| 用戶下單後收到餘額更新 | `/user/queue/balance` 收到 BALANCE_UPDATED，availableBalance 正確 |
-| 用戶刪除品項後收到餘額更新 | `/user/queue/balance` 收到 BALANCE_UPDATED，餘額回升 |
+| 用戶下單後收到餘額變動信號 | `/user/queue/balance` 收到 BALANCE_CHANGED |
+| 用戶刪除品項後收到餘額變動信號 | `/user/queue/balance` 收到 BALANCE_CHANGED |
+| 扣款成功後參與者收到餘額變動信號 | 每位參與者各收到一次 BALANCE_CHANGED，未參與的團主不收 |
 | 扣款成功後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=SETTLED) |
 | 扣款失敗後通知 | `/user/queue/notification` 收到 SETTLEMENT (result=FAILED) |
 | 自動重試用完後通知 | 團主與管理員的 `/user/queue/notification` 收到 SETTLEMENT (result=ERROR) |
-| 其他用戶下單不會收到通知 | 非當事人不收到 BALANCE_UPDATED |
+| 其他用戶下單不會收到通知 | 非當事人不收到 BALANCE_CHANGED |
 | 未認證的 WebSocket 連線 | 拒絕連線 |
 
 ### 8.7 Mapper 整合測試重點
