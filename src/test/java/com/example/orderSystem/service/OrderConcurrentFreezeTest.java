@@ -146,7 +146,7 @@ class OrderConcurrentFreezeTest extends AbstractIntegrationTest {
         try {
             ready.countDown();
             go.await(10, TimeUnit.SECONDS);
-            orderService.createUserOrder(req, userId);
+            orderService.createUserOrder(req, userId, null);
             success.incrementAndGet();
         } catch (Throwable t) {
             errors.add(t);

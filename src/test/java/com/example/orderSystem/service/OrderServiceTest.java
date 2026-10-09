@@ -172,7 +172,7 @@ class OrderServiceTest {
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
             when(orderItemMapper.insert((OrderItem) any())).thenReturn(1);
 
-            assertThatCode(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 2), "alice"))
+            assertThatCode(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 2), "alice", null))
                     .doesNotThrowAnyException();
             verify(orderItemMapper).insert((OrderItem) any());
         }
@@ -180,9 +180,10 @@ class OrderServiceTest {
         @Test
         @DisplayName("訂單不存在 → ResourceNotFoundException")
         void orderNotFound() {
+            when(userMapper.selectForUpdate("alice")).thenReturn(createUser("alice", 5000L));
             when(orderMapper.selectById("bad")).thenReturn(null);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("bad", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("bad", 1, 1), "alice", null))
                     .isInstanceOf(ResourceNotFoundException.class)
                     .hasMessage("該筆訂單不存在");
         }
@@ -191,9 +192,10 @@ class OrderServiceTest {
         @DisplayName("訂單非 OPEN → BadRequestException")
         void orderNotOpen() {
             Order order = createOrder("ord-001", "bob", OrderStatus.CLOSED);
+            when(userMapper.selectForUpdate("alice")).thenReturn(createUser("alice", 5000L));
             when(orderMapper.selectById("ord-001")).thenReturn(order);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice", null))
                     .isInstanceOf(IllegalStateException.class);
         }
 
@@ -210,7 +212,7 @@ class OrderServiceTest {
             when(userMapper.selectForUpdate("alice")).thenReturn(user);
             when(orderItemMapper.getFrozenAmount("alice")).thenReturn(0L);
 
-            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice"))
+            assertThatThrownBy(() -> orderService.createUserOrder(createItemReq("ord-001", 1, 1), "alice", null))
                     .isInstanceOf(InsufficientBalanceException.class);
         }
 
