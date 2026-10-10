@@ -116,6 +116,10 @@ Client (REST + WebSocket)
 | `POST /order/cancel_order` | Yes |
 | `POST /order/pay_order` | Yes |
 | `GET /user/get_user_transaction_record` | Yes |
+| `POST /user/create_recharge_order` | Yes |
+| `GET /user/get_recharge_order` | Yes |
+| `POST /pay/notify/**` | No (付款通道回呼,內容不採信、一律回頭查單) |
+| `POST /mock-channel/pay` | No (模擬通道,僅 `app.pay.channel=mock`) |
 | `GET /user/get_unread_notifications` | Yes |
 | `POST /user/read_notification` | Yes |
 | `WS /ws` | Yes (STOMP 連線時驗證 JWT) |
@@ -126,6 +130,7 @@ Client (REST + WebSocket)
 | `/admin/rbac/**` | Yes + 僅超級管理員(見 2.7) |
 | `GET /admin/orders/**` | Yes + RBAC 授權(客服,見 2.7) |
 | `GET /admin/transactions/**` | Yes + RBAC 授權(會計,見 2.7) |
+| `POST /admin/transactions/**` | Yes + RBAC 授權(會計,見 2.7) |
 
 > 免登入白名單集中定義於 `SecurityConstants.WHITE_LIST`;「需要認證」的端點中,
 > 只有登記於 `resources` 表的才另外受 RBAC 角色授權管制,其餘登入即可。
@@ -225,17 +230,23 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 - 全量替換語意:空陣列 = 清空;含不存在的 id/name → 400 整批拒絕
 - 角色/使用者不存在 → 404;寫入成功後立即失效對應快取
 
-#### 2.7.6 後台唯讀端點(依角色授權)
+#### 2.7.6 後台端點(依角色授權)
 
 一般查詢端點只回呼叫者參與的資料(見 3.x 各端點);需要跨使用者檢視的職能改走獨立端點,
-由 `role_resources` 決定誰能呼叫。這些端點**只唯讀**,不提供任何資料異動能力。
+由 `role_resources` 決定誰能呼叫。除了會計的人工對單,這些端點**只唯讀**。
 
 | Method | Path | 授權角色 | 說明 |
 |--------|------|---------|------|
 | GET | `/admin/orders/get_all_orders` | 客服 | 分頁取得全系統訂單 |
 | GET | `/admin/orders/get_order_detail?orderId=X` | 客服 | 取得任一訂單明細 |
 | GET | `/admin/transactions/get_user_transaction_record?userId=X` | 會計 | 取得指定使用者的交易紀錄(使用者不存在 → 404,不回空清單) |
+| GET | `/admin/transactions/get_all_transactions` | 會計 | 分頁取得全體交易紀錄,可依 type / userId / from / to 篩選(見 3.6) |
+| GET | `/admin/transactions/get_recharge_orders` | 會計 | 分頁取得儲值單,可依 status / userId / from / to 篩選(見 3.6) |
+| POST | `/admin/transactions/sync_recharge_order?rechargeId=X` | 會計 | 人工對單:重新向通道查詢,已付款即入帳(見 7.5) |
 
+> 人工對單是 POST,必須另外登記 `('/admin/transactions/**', 'POST')`(V12):
+> 未登記的端點預設「登入即可」,漏登會讓任何使用者都能觸發對單。
+>
 > 取消訂單與刪除品項**不走後台端點**:兩者維持原端點、不登記於 `resources`,
 > 由 service 層判斷「開團者 or 客服 / 超級管理員」。授權層回答「能不能呼叫這支 API」,
 > service 層回答「能不能動這一筆資料」。
@@ -816,6 +827,116 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 ---
 
+### 3.5 儲值 API
+
+流程與狀態機見 7.5。
+
+#### POST `/user/create_recharge_order`
+
+建立儲值單並向付款通道建立付款。儲值對象一律是登入者本人,body 帶 `userId` 會被忽略。
+
+**Request Body:**
+
+```json
+{ "amount": 500 }
+```
+
+| 欄位 | 規則 |
+|------|------|
+| amount | 必填,1 ~ 50000 的整數(`1.5` 這類小數回 400,不會被截成 1) |
+
+**Response 200 OK:**
+
+```json
+{
+  "rechargeId": "3f0c...",
+  "userId": "alice",
+  "amount": 500,
+  "status": "WAITING",
+  "createdAt": "2026-10-08 10:00:00",
+  "expireAt": "2026-10-08 10:15:00",
+  "paidAt": null,
+  "payInfo": "mock://pay/3f0c..."
+}
+```
+
+| 情況 | 回應 |
+|------|------|
+| amount 不合法 | 400 |
+| 付款通道建立付款失敗 | 502,儲值單標記為 CLOSED(不留下 WAITING 的單) |
+
+#### GET `/user/get_recharge_order?rechargeId=X`
+
+查詢自己的儲值單(回應同上,不含 `payInfo`)。他人的單與不存在的單一律 404。
+
+#### POST `/pay/notify/mock`(免登入)
+
+模擬通道的付款回呼。**只讀 `rechargeId`**,其餘欄位(狀態、金額)一律忽略,付款結果以回頭查單為準。
+
+```json
+{ "rechargeId": "3f0c..." }
+```
+
+| 情況 | 回應 |
+|------|------|
+| 已入帳 / 尚未付款 / 本地查無此單 | 200 `success`(通道停止重送) |
+| 向通道查單失敗 | 502(通道稍後重送) |
+
+#### POST `/mock-channel/pay?rechargeId=X&callback=ONCE|TWICE|DROP`(免登入,開發用)
+
+扮演「使用者在通道付款」與「通道送回呼」。`callback` 決定回呼送一次、兩次或不送;回呼在行程內直接呼叫,不發 HTTP。
+付款期限已過或通道查無此付款 → 400。只在 `app.pay.channel=mock`(預設)時存在。
+
+---
+
+### 3.6 會計對帳 API
+
+授權見 2.7.6。分頁參數同 3.1(`page` ≥ 1、`size` 1~20)。日期 `from` / `to` 為 `yyyy-MM-dd`,起訖日都包含在內。
+
+#### GET `/admin/transactions/get_all_transactions`
+
+| 參數 | 說明 |
+|------|------|
+| type | `DEBIT` / `RECHARGE`,選填 |
+| userId | 選填 |
+| from / to | 選填 |
+
+**Response 200 OK:**
+
+```json
+{
+  "records": [
+    {
+      "transactionId": "a1b2...",
+      "userId": "alice",
+      "type": "RECHARGE",
+      "amount": 500,
+      "closingBalance": 5500,
+      "orderId": null,
+      "rechargeId": "3f0c...",
+      "createdBy": "alice",
+      "createdAt": "2026-10-08 10:01:00"
+    }
+  ],
+  "page": 1, "size": 10, "total": 1, "totalPages": 1
+}
+```
+
+- `amount` 帶正負號:儲值為正、扣款為負
+- 扣款帶 `orderId`,儲值帶 `rechargeId`(V12 之前的種子儲值紀錄為 null)
+- 依 `createdAt` 由新到舊
+
+#### GET `/admin/transactions/get_recharge_orders`
+
+參數同上,`type` 改為 `status`(`WAITING` / `SUCCESS` / `CLOSED`)。回應的每筆同 3.5 儲值單(不含 `payInfo`)。
+
+#### POST `/admin/transactions/sync_recharge_order?rechargeId=X`
+
+人工對單。對 WAITING 或 CLOSED 的單重新向通道查詢,已付款即入帳,流水的 `createdBy` 記為發起的會計;
+對 SUCCESS 的單不查通道、不異動。回應為對單後的儲值單。查無此單 → 404。
+
+---
+
 ## 4. 資料庫設計
 
 資料庫版本控制使用 Flyway，migration 檔案位於 `src/main/resources/db/migration/`。
@@ -826,6 +947,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 users (1) ──┬──< orders (N)          [created_by → user_id]
             ├──< order_items (N)     [user_id → user_id]
             ├──< transactions (N)    [user_id → user_id]
+            ├──< recharge_orders (N) [user_id → user_id]
             ├──< notifications (N)   [user_id → user_id]
             └──< order_item_idempotency_keys (N)  [user_id → user_id, CASCADE]
 
@@ -836,6 +958,8 @@ orders (1) ──┬──< order_items (N)    [order_id → order_id]
              └──< transactions (N)   [order_id → order_id, nullable, RESTRICT]
 
 menus (1) ──< order_items (N)        [menu_id → menu_id]
+
+recharge_orders (1) ──< transactions (0..1)  [recharge_id → recharge_id, nullable, UNIQUE, RESTRICT]
 ```
 
 ### 4.2 資料表定義
@@ -917,6 +1041,7 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 | transaction_id | VARCHAR(36) | Y | Y | UUID |
 | user_id | VARCHAR(20) | | Y | FK → users (RESTRICT) |
 | order_id | VARCHAR(36) | | | FK → orders (RESTRICT)，nullable，儲值時為 NULL |
+| recharge_id | VARCHAR(36) | | | FK → recharge_orders (RESTRICT)，nullable，**UNIQUE**，儲值時為來源儲值單、扣款時為 NULL |
 | amount | INT | | Y | 交易金額 (正數) |
 | closing_balance | INT | | Y | 交易後餘額 |
 | type | VARCHAR(20) | | Y | DEBIT(扣款), RECHARGE(儲值) |
@@ -924,6 +1049,23 @@ menus (1) ──< order_items (N)        [menu_id → menu_id]
 | created_by | VARCHAR(20) | | Y | 操作者 |
 
 索引: `(user_id, created_at DESC)` 複合索引，加速交易紀錄查詢。
+
+`recharge_id` 的 UNIQUE 是條件式入帳之外的第二道防線:即使入帳邏輯日後被改壞,同一筆儲值單也寫不出第二筆流水。MySQL 的 UNIQUE 允許多個 NULL,扣款紀錄不受影響。
+
+#### recharge_orders - 儲值單 (V12)
+
+| 欄位 | 型別 | PK | NOT NULL | 說明 |
+|------|------|----|----------|------|
+| recharge_id | VARCHAR(36) | Y | Y | UUID,同時作為送給付款通道的商戶單號 |
+| user_id | VARCHAR(20) | | Y | FK → users (RESTRICT) |
+| amount | INT | | Y | 儲值金額 (1 ~ 50000) |
+| status | VARCHAR(20) | | Y | WAITING / SUCCESS / CLOSED |
+| expire_at | DATETIME | | Y | 本地過期時間(建立 + 15 分鐘),晚於通道付款期限 |
+| paid_at | DATETIME | | | 入帳時間 |
+| created_at | DATETIME | | Y | 建立時間 |
+| updated_at | DATETIME | | Y | 更新時間 |
+
+索引: `(status, created_at)` 供主動查單、`(status, expire_at)` 供過期關單、`(user_id, created_at)` 供依使用者查詢。
 
 #### notifications - 站內通知(V11)
 
@@ -995,6 +1137,14 @@ OPEN ──→ CLOSED ──→ SETTLED
 |------|------|
 | DEBIT | 扣款 |
 | RECHARGE | 儲值 |
+
+### RechargeStatus
+
+| 名稱 | 說明 |
+|------|------|
+| WAITING | 等待付款 |
+| SUCCESS | 已入帳 |
+| CLOSED | 已關閉(過期且最後一次查單仍未付款,或通道建立付款失敗) |
 
 ### NotificationType
 
@@ -1359,6 +1509,53 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 
 ---
 
+### 7.5 儲值流程
+
+付款通道的回呼可能送兩次,也可能完全沒送到。**沒收到回呼不代表沒付款**:使用者可能已經付了,只是通知丟了(掉單)。
+因此回呼、主動查單、過期關單、人工對單都只負責「問出付款結果」,入帳一律走同一個方法。
+
+```
+            入帳(回呼/主動查單/過期關單/人工對單)
+  WAITING ─────────────────────────────────────▶ SUCCESS
+     │                                              ▲
+     │ 過期關單:最後查單仍未付款                     │ 僅人工對單
+     ▼                                              │
+  CLOSED ───────────────────────────────────────────┘
+```
+
+#### 入帳只發生一次
+
+`RechargeCreditService.credit` 在同一個交易內:
+
+1. `UPDATE recharge_orders SET status='SUCCESS', paid_at=? WHERE recharge_id=? AND status IN (...)`;`affected_rows = 0` → 直接返回
+2. `UPDATE users SET balance = balance + ? WHERE user_id = ?`
+3. 讀回新餘額,寫入 `transactions`(type='RECHARGE'、recharge_id、closing_balance)
+4. 發布 `BalanceChangedEvent`,commit 後推播「餘額已變動」訊號(client 收到後重新查詢)
+
+和結算搶訂單狀態(7.3)是同一個條件式寫入;自動路徑只允許從 WAITING 入帳,CLOSED → SUCCESS 只有人工對單能觸發。
+
+#### 四個觸發來源
+
+| 來源 | 對象 | 查到 PAID | 查到 WAITING / CLOSED / NOT_FOUND | 查單失敗 |
+|------|------|-----------|-----------------------------------|---------|
+| 回呼 | 回呼帶的單號 | 入帳 | 不動,回 200 | 回 502,通道重送 |
+| 主動查單(每 30 秒) | WAITING 且建立於 10 分鐘內 | 入帳 | **不動** | 記 log,其他筆照跑 |
+| 過期關單(每 60 秒) | WAITING 且已過 `expire_at` | 入帳,不關單 | 條件式關單 WAITING → CLOSED | 不關單,下一輪再試 |
+| 人工對單(會計) | 指定單號 | 入帳(WAITING 或 CLOSED) | 不動 | 回 502 |
+
+- 回呼的內容不採信,只取單號回頭查通道;偽造的回呼最多造成一次多餘的查單
+- 主動查單查到「沒付」「查無此單」都不動:使用者可能下一秒才付款,判定沒付只交給過期關單
+- 通道付款期限(10 分鐘)早於本地過期(15 分鐘):過期關單時通道已關閉付款入口,不可能再收款
+- 通道回報的金額與儲值單不符時不入帳,只記錄錯誤,留待人工處理
+- 查單在資料庫交易外執行,通道慢的時候不拖住 DB 連線與列鎖
+- 多台機器同時跑排程會重複查單,重複入帳由條件式寫入與 UNIQUE 擋住
+
+#### 建立儲值單:先寫本地、再建立通道付款
+
+反過來的話,通道建好了、本地卻寫失敗,使用者付了錢會找不到可以入帳的單。這個順序最壞只會多一筆 CLOSED。
+
+---
+
 ## 8. 測試規格
 
 ### 8.1 測試架構
@@ -1565,3 +1762,48 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 | OrderMapper | `selectByStatus` 查詢指定狀態的訂單 (重啟恢復用) |
 | UserMapper | `casDebit` CAS 扣款：UPDATE balance WHERE balance >= amount |
 | TransactionMapper | 批次 insert 多筆 transaction 紀錄 |
+
+### 8.8 儲值模組測試
+
+#### 入帳與查單(RechargeIntegrationTest、RechargeServiceTest)
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 入帳 | 儲值單 SUCCESS + paid_at、餘額增加、一筆 RECHARGE 流水(recharge_id、closing_balance) |
+| 同一筆入帳兩次 / 兩個執行緒同時入帳 | 餘額只加一次、流水只有一筆 |
+| 寫流水失敗 | 儲值單狀態與餘額一起回滾 |
+| 過期關單與入帳同時處理同一筆 | 只會是 SUCCESS(加一次)或 CLOSED(沒加)其中之一 |
+| 入帳 commit 後 | 推播入帳後的可用餘額 |
+| 回呼遺失、已付款 | 下一次主動查單入帳 |
+| 建立超過 10 分鐘的單 | 不在主動查單範圍 |
+| 通道回覆未付款 / 查無此單 | 維持 WAITING,之後付款仍可入帳 |
+| 主動查單其中一筆失敗 | 其他筆照常入帳 |
+| 過期:已付 / 未付 / 查單失敗 | SUCCESS / CLOSED / 維持 WAITING |
+| 通道回覆 PAID 但金額不符 | 不入帳 |
+
+#### 儲值端點(RechargeControllerTest)
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 建立儲值單 amount=500 | 200,WAITING,餘額與流水不變 |
+| amount = 0 / -1 / 50001 / 1.5 / null | 400,不建立儲值單 |
+| body 帶別人的 userId | 儲值單仍屬於呼叫者 |
+| 通道建立付款失敗 | 502,不留下 WAITING 的單 |
+| 查別人的儲值單 / 查無此單 | 404 |
+| 模擬付款 ONCE / TWICE | SUCCESS,餘額只加一次 |
+| 模擬付款 DROP | WAITING,主動查單後 SUCCESS |
+| 偽造回呼(沒付款就送) | 200,不入帳 |
+| 回呼時查通道失敗 | 5xx,狀態不變 |
+| 通道付款期限已過再付款 | 400 |
+
+#### 會計對帳端點(AdminQueryControllerTest)
+
+| 測試案例 | 預期結果 |
+|---------|---------|
+| 不帶篩選查全部交易紀錄 | 200,全體使用者分頁 |
+| 依 type + userId 篩選 | 儲值為正帶 rechargeId,扣款為負帶 orderId |
+| 依日期區間篩選 | 起訖日都包含,由新到舊 |
+| 依狀態查儲值單 | 只回該狀態 |
+| 人工對單:CLOSED 但通道已付款 | SUCCESS,流水 createdBy = 會計 |
+| 人工對單:未付款 / 已入帳 / 查無此單 | 狀態不變 / 不變 / 404 |
+| 沒有角色或只有客服 | 三個端點都 403,對單不異動資料 |

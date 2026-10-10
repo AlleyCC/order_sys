@@ -71,6 +71,12 @@ public class GlobalExceptionHandler {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "必須輸入 " + ex.getParameterName());
     }
 
+    /** 付款通道失敗:結果未知,回 502 讓呼叫端(含通道的回呼重送)知道可以重試 */
+    @ExceptionHandler(com.example.orderSystem.payment.PayChannelException.class)
+    public ProblemDetail handlePayChannel(com.example.orderSystem.payment.PayChannelException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_GATEWAY, ex.getMessage());
+    }
+
     @ExceptionHandler(BadRequestException.class)
     public ProblemDetail handleBadRequest(BadRequestException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());

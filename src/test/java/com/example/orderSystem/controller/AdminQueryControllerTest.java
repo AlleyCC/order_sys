@@ -1,16 +1,24 @@
 package com.example.orderSystem.controller;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.orderSystem.entity.Order;
 import com.example.orderSystem.entity.Role;
+import com.example.orderSystem.entity.Transaction;
 import com.example.orderSystem.entity.User;
 import com.example.orderSystem.entity.UserRole;
 import com.example.orderSystem.enums.OrderStatus;
+import com.example.orderSystem.enums.RechargeStatus;
+import com.example.orderSystem.enums.TradeType;
 import com.example.orderSystem.mapper.OrderMapper;
+import com.example.orderSystem.mapper.RechargeOrderMapper;
 import com.example.orderSystem.mapper.RoleMapper;
+import com.example.orderSystem.mapper.TransactionMapper;
 import com.example.orderSystem.mapper.UserMapper;
 import com.example.orderSystem.mapper.UserRoleMapper;
+import com.example.orderSystem.payment.MockPayChannel;
 import com.example.orderSystem.service.RbacCacheService;
+import com.example.orderSystem.service.RechargeService;
 import com.example.orderSystem.support.AbstractIntegrationTest;
 import com.example.orderSystem.util.JwtUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -23,9 +31,12 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 import static com.example.orderSystem.support.TestFixtures.insertOrder;
+import static com.example.orderSystem.support.TestFixtures.seedUser;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -42,6 +53,10 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
     @Autowired RoleMapper roleMapper;
     @Autowired UserRoleMapper userRoleMapper;
     @Autowired RbacCacheService rbacCacheService;
+    @Autowired TransactionMapper transactionMapper;
+    @Autowired RechargeOrderMapper rechargeOrderMapper;
+    @Autowired RechargeService rechargeService;
+    @Autowired MockPayChannel mockPayChannel;
     @Autowired OrderMapper orderMapper;
 
     private static final String STAFF = "fx-adminquery-staff";
@@ -267,5 +282,244 @@ class AdminQueryControllerTest extends AbstractIntegrationTest {
                             .header("Authorization", "Bearer " + staffToken))
                     .andExpect(status().isForbidden());
         }
+    }
+
+    @Nested
+    @DisplayName("GET /admin/transactions/get_all_transactions")
+    class AllTransactions {
+
+        @Test
+        @DisplayName("會計不帶篩選 → 200,全體使用者第一頁 + 總筆數,每筆帶對帳所需欄位")
+        void accountantReadsAllUsers() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.page").value(1))
+                    .andExpect(jsonPath("$.total").value(greaterThanOrEqualTo(2)))
+                    .andExpect(jsonPath("$.records[0].transactionId").exists())
+                    .andExpect(jsonPath("$.records[0].userId").exists())
+                    .andExpect(jsonPath("$.records[0].type").exists())
+                    .andExpect(jsonPath("$.records[0].closingBalance").exists())
+                    .andExpect(jsonPath("$.records[0].createdBy").exists());
+        }
+
+        @Test
+        @DisplayName("依 type + userId 篩選:儲值為正並帶 rechargeId,扣款為負並帶 orderId")
+        void filtersByTypeAndUser() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            String rechargeId = paidRecharge(userId, 500);
+            insertTxn(userId, TradeType.DEBIT, 120, LocalDateTime.of(2020, 1, 15, 12, 0));
+
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .param("type", "RECHARGE")
+                            .param("userId", userId)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.total").value(1))
+                    .andExpect(jsonPath("$.records[0].type").value("RECHARGE"))
+                    .andExpect(jsonPath("$.records[0].amount").value(500))
+                    .andExpect(jsonPath("$.records[0].rechargeId").value(rechargeId));
+
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .param("type", "DEBIT")
+                            .param("userId", userId)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.total").value(1))
+                    .andExpect(jsonPath("$.records[0].amount").value(-120))
+                    .andExpect(jsonPath("$.records[0].orderId").value("ord-001"));
+        }
+
+        @Test
+        @DisplayName("依日期區間篩選:起訖日都包含在內,由新到舊")
+        void filtersByDateRange() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            insertTxn(userId, TradeType.DEBIT, 10, LocalDateTime.of(2020, 1, 14, 23, 59));
+            insertTxn(userId, TradeType.DEBIT, 20, LocalDateTime.of(2020, 1, 15, 0, 0));
+            insertTxn(userId, TradeType.DEBIT, 30, LocalDateTime.of(2020, 1, 16, 23, 59));
+            insertTxn(userId, TradeType.DEBIT, 40, LocalDateTime.of(2020, 1, 17, 0, 0));
+
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .param("userId", userId)
+                            .param("from", "2020-01-15")
+                            .param("to", "2020-01-16")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.total").value(2))
+                    .andExpect(jsonPath("$.records[0].amount").value(-30))
+                    .andExpect(jsonPath("$.records[1].amount").value(-20));
+        }
+
+        @Test
+        @DisplayName("size=21 / page=0 → 400")
+        void invalidPagingRejected() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .param("size", "21")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isBadRequest());
+            mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                            .param("page", "0")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isBadRequest());
+        }
+    }
+
+    @Nested
+    @DisplayName("GET /admin/transactions/get_recharge_orders")
+    class RechargeOrders {
+
+        @Test
+        @DisplayName("依狀態 + userId 篩選:只回該狀態的儲值單")
+        void filtersByStatus() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            String closed = rechargeService.createRechargeOrder(userId, 300).getRechargeId();
+            rechargeOrderMapper.closeIfWaiting(closed);
+            paidRecharge(userId, 500);
+
+            mockMvc.perform(get("/admin/transactions/get_recharge_orders")
+                            .param("status", "CLOSED")
+                            .param("userId", userId)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.total").value(1))
+                    .andExpect(jsonPath("$.records[0].rechargeId").value(closed))
+                    .andExpect(jsonPath("$.records[0].status").value("CLOSED"))
+                    .andExpect(jsonPath("$.records[0].userId").value(userId));
+        }
+    }
+
+    @Nested
+    @DisplayName("POST /admin/transactions/sync_recharge_order")
+    class ManualSync {
+
+        @Test
+        @DisplayName("CLOSED 但通道其實已付款 → SUCCESS,流水的操作者是會計")
+        void closedButPaidIsCredited() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            String id = rechargeService.createRechargeOrder(userId, 500).getRechargeId();
+            mockPayChannel.markPaid(id);
+            rechargeOrderMapper.closeIfWaiting(id);     // 本地已關單,通道其實收到錢了
+
+            mockMvc.perform(post("/admin/transactions/sync_recharge_order")
+                            .param("rechargeId", id)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+            assertThat(userMapper.selectById(userId).getBalance()).isEqualTo(500L);
+            assertThat(rechargeTxns(id)).singleElement()
+                    .extracting(Transaction::getCreatedBy).isEqualTo(STAFF);
+        }
+
+        @Test
+        @DisplayName("通道回覆未付款 → 狀態不變")
+        void unpaidStaysClosed() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            String id = rechargeService.createRechargeOrder(userId, 500).getRechargeId();
+            rechargeOrderMapper.closeIfWaiting(id);
+
+            mockMvc.perform(post("/admin/transactions/sync_recharge_order")
+                            .param("rechargeId", id)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("CLOSED"));
+
+            assertThat(userMapper.selectById(userId).getBalance()).isZero();
+        }
+
+        @Test
+        @DisplayName("已入帳的單再對一次 → 仍是 SUCCESS,餘額與流水不變")
+        void alreadyPaidUnchanged() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+            String userId = seedUser(userMapper, "audit", 0);
+            String id = paidRecharge(userId, 500);
+
+            mockMvc.perform(post("/admin/transactions/sync_recharge_order")
+                            .param("rechargeId", id)
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+            assertThat(userMapper.selectById(userId).getBalance()).isEqualTo(500L);
+            assertThat(rechargeTxns(id)).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("查無此單 → 404")
+        void unknownIs404() throws Exception {
+            setStaffRoles("ACCOUNTANT");
+
+            mockMvc.perform(post("/admin/transactions/sync_recharge_order")
+                            .param("rechargeId", "no-such")
+                            .header("Authorization", "Bearer " + staffToken))
+                    .andExpect(status().isNotFound());
+        }
+    }
+
+    @Nested
+    @DisplayName("對帳端點的授權")
+    class AuditAuthorization {
+
+        @Test
+        @DisplayName("沒有角色 / 只有客服 → 三個端點都 403,且對單不異動資料")
+        void othersForbidden() throws Exception {
+            String userId = seedUser(userMapper, "audit", 0);
+            String id = rechargeService.createRechargeOrder(userId, 500).getRechargeId();
+            mockPayChannel.markPaid(id);
+            rechargeOrderMapper.closeIfWaiting(id);
+
+            for (String[] roles : new String[][]{{}, {"CUSTOMER_SERVICE"}}) {
+                setStaffRoles(roles);
+
+                mockMvc.perform(get("/admin/transactions/get_all_transactions")
+                                .header("Authorization", "Bearer " + staffToken))
+                        .andExpect(status().isForbidden());
+                mockMvc.perform(get("/admin/transactions/get_recharge_orders")
+                                .header("Authorization", "Bearer " + staffToken))
+                        .andExpect(status().isForbidden());
+                mockMvc.perform(post("/admin/transactions/sync_recharge_order")
+                                .param("rechargeId", id)
+                                .header("Authorization", "Bearer " + staffToken))
+                        .andExpect(status().isForbidden());
+            }
+
+            assertThat(rechargeOrderMapper.selectById(id).getStatus()).isEqualTo(RechargeStatus.CLOSED);
+            assertThat(userMapper.selectById(userId).getBalance()).isZero();
+        }
+    }
+
+    /** 建立一筆儲值單,模擬付款並送一次回呼入帳 */
+    private String paidRecharge(String userId, int amount) {
+        String id = rechargeService.createRechargeOrder(userId, amount).getRechargeId();
+        mockPayChannel.markPaid(id);
+        rechargeService.handleNotify(id);
+        return id;
+    }
+
+    private void insertTxn(String userId, TradeType type, int amount, LocalDateTime createdAt) {
+        Transaction txn = new Transaction();
+        txn.setTransactionId(UUID.randomUUID().toString());
+        txn.setUserId(userId);
+        txn.setOrderId(type == TradeType.DEBIT ? "ord-001" : null);
+        txn.setAmount(amount);
+        txn.setClosingBalance(0);
+        txn.setType(type);
+        txn.setCreatedBy(userId);
+        txn.setCreatedAt(createdAt);
+        transactionMapper.insert(txn);
+    }
+
+    private List<Transaction> rechargeTxns(String rechargeId) {
+        return transactionMapper.selectList(
+                new LambdaQueryWrapper<Transaction>().eq(Transaction::getRechargeId, rechargeId));
     }
 }

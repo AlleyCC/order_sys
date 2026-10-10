@@ -11,6 +11,12 @@
           AND balance >= #{amount}
     </update>
 
+    <update id="creditBalance">
+        UPDATE users
+        SET balance = balance + #{amount}
+        WHERE user_id = #{userId}
+    </update>
+
     <select id="selectForUpdate" resultType="com.example.orderSystem.entity.User">
         SELECT * FROM users WHERE user_id = #{userId} FOR UPDATE
     </select>
