@@ -33,7 +33,7 @@ class RedisWebSocketRelayTest {
     void relaysEnvelope() {
         String json = """
                 {"userId":"alice","destination":"/queue/balance",
-                 "payload":{"type":"BALANCE_UPDATED","availableBalance":4500,"reason":"下單"}}
+                 "payload":{"type":"BALANCE_CHANGED","reason":"下單"}}
                 """;
 
         Message message = mock(Message.class);

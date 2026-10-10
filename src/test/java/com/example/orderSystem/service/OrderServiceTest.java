@@ -69,8 +69,6 @@ class OrderServiceTest {
     @Mock
     private SettlementNotificationRecorder notificationRecorder;
 
-    // ========== helpers ==========
-
     private Store createStore(String storeId) {
         Store s = new Store();
         s.setStoreId(storeId);
@@ -124,8 +122,6 @@ class OrderServiceTest {
         return oi;
     }
 
-    // ========== create_order ==========
-
     @Nested
     @DisplayName("createOrder")
     class CreateOrder {
@@ -163,8 +159,6 @@ class OrderServiceTest {
             return req;
         }
     }
-
-    // ========== create_user_order ==========
 
     @Nested
     @DisplayName("createUserOrder")
@@ -236,8 +230,6 @@ class OrderServiceTest {
         }
     }
 
-    // ========== delete_user_order ==========
-
     @Nested
     @DisplayName("deleteUserOrder")
     class DeleteUserOrder {
@@ -287,7 +279,6 @@ class OrderServiceTest {
             assertThatCode(() -> orderService.deleteUserOrder(
                     deleteReq("ord-001", "1"), "rescuer"))
                     .doesNotThrowAnyException();
-            // 餘額變動通知的是品項主人,不是執行刪除的救援者
             verify(eventPublisher).publishEvent(
                     new BalanceChangedEvent("charlie", "刪除品項：" + item.getProductName()));
         }
@@ -339,8 +330,6 @@ class OrderServiceTest {
             return req;
         }
     }
-
-    // ========== cancel_order ==========
 
     @Nested
     @DisplayName("cancelOrder")
@@ -405,8 +394,6 @@ class OrderServiceTest {
                     .isInstanceOf(IllegalStateException.class);
         }
     }
-
-    // ========== pay_order ==========
 
     @Nested
     @DisplayName("payOrder")
@@ -482,7 +469,7 @@ class OrderServiceTest {
         }
 
         @Test
-        @DisplayName("扣款成功 → 每位參與者各推一次可用餘額(同一人多個品項只推一次)")
+        @DisplayName("扣款成功 → 每位參與者各發一次餘額變動事件(同一人多個品項只發一次)")
         void pushesBalanceToEachParticipantOnSuccess() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
@@ -490,35 +477,16 @@ class OrderServiceTest {
                     createOrderItem(1, "ord-001", "bob", 70),
                     createOrderItem(2, "ord-001", "bob", 30),
                     createOrderItem(3, "ord-001", "carol", 50)));
-            when(userMapper.selectById("bob")).thenReturn(createUser("bob", 400));
-            when(userMapper.selectById("carol")).thenReturn(createUser("carol", 950));
-            when(orderItemMapper.getFrozenAmount("bob")).thenReturn(100L);
-            when(orderItemMapper.getFrozenAmount("carol")).thenReturn(0L);
 
             orderService.payOrder("ord-001");
 
-            verify(notificationService).sendBalanceUpdate("bob", 300, "結算：Test Order");
-            verify(notificationService).sendBalanceUpdate("carol", 950, "結算：Test Order");
-            verify(notificationService, times(2)).sendBalanceUpdate(any(), anyLong(), any());
+            verify(eventPublisher).publishEvent(new BalanceChangedEvent("bob", "結算：Test Order"));
+            verify(eventPublisher).publishEvent(new BalanceChangedEvent("carol", "結算：Test Order"));
+            verify(eventPublisher, times(2)).publishEvent(any(BalanceChangedEvent.class));
         }
 
         @Test
-        @DisplayName("餘額推播失敗 → payOrder 仍正常返回,其他人照推")
-        void balancePushFailureDoesNotAffectSuccess() {
-            Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
-            when(orderMapper.selectById("ord-001")).thenReturn(order);
-            when(orderItemMapper.selectList(any())).thenReturn(List.of(
-                    createOrderItem(1, "ord-001", "bob", 70),
-                    createOrderItem(2, "ord-001", "carol", 50)));
-            when(userMapper.selectById("bob")).thenThrow(new RuntimeException("db hiccup"));
-            when(userMapper.selectById("carol")).thenReturn(createUser("carol", 950));
-
-            assertThatCode(() -> orderService.payOrder("ord-001")).doesNotThrowAnyException();
-            verify(notificationService).sendBalanceUpdate(eq("carol"), anyLong(), any());
-        }
-
-        @Test
-        @DisplayName("餘額不足 → 沒有人被扣款,不推餘額")
+        @DisplayName("餘額不足 → 沒有人被扣款,不發餘額變動事件")
         void noBalancePushOnInsufficient() {
             Order order = createOrder("ord-001", "alice", OrderStatus.CLOSED);
             when(orderMapper.selectById("ord-001")).thenReturn(order);
@@ -526,7 +494,7 @@ class OrderServiceTest {
 
             assertThatThrownBy(() -> orderService.payOrder("ord-001"))
                     .isInstanceOf(InsufficientBalanceException.class);
-            verify(notificationService, never()).sendBalanceUpdate(any(), anyLong(), any());
+            verify(eventPublisher, never()).publishEvent(any(BalanceChangedEvent.class));
         }
 
         @Test
@@ -550,8 +518,6 @@ class OrderServiceTest {
                     .isInstanceOf(IllegalStateException.class);
         }
     }
-
-    // ========== settle (自動結算) ==========
 
     @Nested
     @DisplayName("settleOrder")
@@ -628,7 +594,6 @@ class OrderServiceTest {
             when(orderMapper.selectById("ord-001")).thenReturn(order);
             when(paymentService.executePayment(order))
                     .thenReturn(List.of(notification("alice"), notification("bob")));
-            // 第一則推播失敗、第二則成功;兩個人都要被嘗試通知
             doThrow(new RedisConnectionFailureException("Redis 斷線"))
                     .doNothing()
                     .when(notificationService).pushSettlement(any());

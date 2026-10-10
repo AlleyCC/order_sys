@@ -28,15 +28,15 @@ class NotificationServiceTest {
     private NotificationPublisher publisher;
 
     @Test
-    @DisplayName("sendBalanceUpdate → publish 到 /queue/balance")
-    void sendBalanceUpdate() {
-        notificationService.sendBalanceUpdate("alice", 4840, "下單：珍珠奶茶(大) x1");
+    @DisplayName("sendBalanceChanged → publish 到 /queue/balance,只帶信號與原因,不帶餘額數字")
+    void sendBalanceChanged() {
+        notificationService.sendBalanceChanged("alice", "下單：珍珠奶茶(大) x1");
 
         ArgumentCaptor<BalanceMessage> captor = ArgumentCaptor.forClass(BalanceMessage.class);
         verify(publisher).publish(eq("alice"), eq("/queue/balance"), captor.capture());
 
         BalanceMessage msg = captor.getValue();
-        assertThat(msg.getAvailableBalance()).isEqualTo(4840);
+        assertThat(msg.getType()).isEqualTo("BALANCE_CHANGED");
         assertThat(msg.getReason()).isEqualTo("下單：珍珠奶茶(大) x1");
     }
 

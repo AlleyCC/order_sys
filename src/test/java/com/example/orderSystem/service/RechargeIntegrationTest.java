@@ -37,8 +37,6 @@ import static com.example.orderSystem.support.TestFixtures.seedRechargeOrder;
 import static com.example.orderSystem.support.TestFixtures.seedUser;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
@@ -143,14 +141,14 @@ class RechargeIntegrationTest extends AbstractIntegrationTest {
         }
 
         @Test
-        @DisplayName("入帳 commit 後推播入帳後的可用餘額")
-        void pushesBalanceAfterCredit() {
+        @DisplayName("入帳 commit 後推播餘額變動訊號")
+        void signalsBalanceChangedAfterCredit() {
             String userId = seedUser(userMapper, "rc", 100);
             String id = createRecharge(userId, 500);
 
             creditService.credit(id, List.of(RechargeStatus.WAITING), userId);
 
-            verify(notificationService).sendBalanceUpdate(eq(userId), eq(600L), anyString());
+            verify(notificationService).sendBalanceChanged(userId, "儲值入帳：500");
         }
 
         @Test
