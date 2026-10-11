@@ -9,6 +9,7 @@ import com.example.orderSystem.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -29,15 +30,15 @@ public class AuthController {
             description = "Header 需帶 `Authorization: JWT <RSA 加密後的密碼>`；成功回傳 access + refresh token。")
     public ResponseEntity<LoginResponse> login(
             @RequestHeader("Authorization") String authorization,
-            @Valid @RequestBody LoginRequest request) {
+            @Valid @RequestBody LoginRequest request,
+            HttpServletRequest httpRequest) {
 
-        // Header format: "JWT <RSA encrypted password>"
         if (!authorization.startsWith("JWT ")) {
             throw new AuthenticationException("帳密錯誤");
         }
         String encryptedPassword = authorization.substring(4);
 
-        LoginResponse response = authService.login(request, encryptedPassword);
+        LoginResponse response = authService.login(request, encryptedPassword, httpRequest.getRemoteAddr());
         return ResponseEntity.ok(response);
     }
 

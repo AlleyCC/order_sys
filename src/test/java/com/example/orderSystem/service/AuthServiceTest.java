@@ -43,6 +43,9 @@ class AuthServiceTest {
     @Mock
     private TokenRedisService tokenRedisService;
 
+    @Mock
+    private LoginRateLimiter loginRateLimiter;
+
     private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
 
     @BeforeEach
@@ -71,11 +74,14 @@ class AuthServiceTest {
         return req;
     }
 
-    // ========== Login ==========
-
     @Nested
     @DisplayName("login")
     class Login {
+
+        @BeforeEach
+        void allowAttempt() {
+            when(loginRateLimiter.tryAttempt(anyString(), anyString())).thenReturn(true);
+        }
 
         @Test
         @DisplayName("成功 → 回傳 accessToken + refreshToken + expiresIn, 並存入 Redis")
@@ -85,7 +91,7 @@ class AuthServiceTest {
             when(userMapper.selectById("alice")).thenReturn(user);
             when(jwtUtils.generateAccessToken("alice")).thenReturn("jwt-token");
 
-            LoginResponse resp = authService.login(loginRequest("alice"), "encrypted");
+            LoginResponse resp = authService.login(loginRequest("alice"), "encrypted", "10.0.0.1");
 
             assertThat(resp.getAccessToken()).isEqualTo("jwt-token");
             assertThat(resp.getRefreshToken()).isNotBlank();
@@ -98,7 +104,7 @@ class AuthServiceTest {
         void rsaDecryptFails() throws Exception {
             when(passwordUtils.decryptPassword("bad")).thenThrow(new RuntimeException("decrypt error"));
 
-            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "bad"))
+            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "bad", "10.0.0.1"))
                     .isInstanceOf(AuthenticationException.class)
                     .hasMessage("帳密錯誤");
         }
@@ -109,7 +115,7 @@ class AuthServiceTest {
             when(passwordUtils.decryptPassword("encrypted")).thenReturn("test1234");
             when(userMapper.selectById("nobody")).thenReturn(null);
 
-            assertThatThrownBy(() -> authService.login(loginRequest("nobody"), "encrypted"))
+            assertThatThrownBy(() -> authService.login(loginRequest("nobody"), "encrypted", "10.0.0.1"))
                     .isInstanceOf(AuthenticationException.class)
                     .hasMessage("帳密錯誤");
         }
@@ -121,13 +127,29 @@ class AuthServiceTest {
             when(passwordUtils.decryptPassword("encrypted")).thenReturn("wrong");
             when(userMapper.selectById("alice")).thenReturn(user);
 
-            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "encrypted"))
+            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "encrypted", "10.0.0.1"))
                     .isInstanceOf(AuthenticationException.class)
                     .hasMessage("帳密錯誤");
         }
     }
 
-    // ========== Refresh ==========
+    @Nested
+    @DisplayName("login 被限流")
+    class LoginRateLimited {
+
+        @Test
+        @DisplayName("限流拒絕 → 回帳密錯誤,且不解密、不查使用者、不記錄成功")
+        void rejectedBeforePasswordCheck() {
+            when(loginRateLimiter.tryAttempt("alice", "10.0.0.1")).thenReturn(false);
+
+            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "encrypted", "10.0.0.1"))
+                    .isInstanceOf(AuthenticationException.class)
+                    .hasMessage("帳密錯誤");
+
+            verifyNoInteractions(passwordUtils, userMapper, jwtUtils, tokenRedisService);
+            verify(loginRateLimiter, never()).onSuccess(anyString(), anyString());
+        }
+    }
 
     @Nested
     @DisplayName("refresh")
@@ -168,8 +190,6 @@ class AuthServiceTest {
                     .hasMessage("Refresh Token 已失效");
         }
     }
-
-    // ========== Logout ==========
 
     @Nested
     @DisplayName("logout")

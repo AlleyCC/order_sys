@@ -14,16 +14,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/**
- * 扮演「使用者在通道付款」以及「通道送回呼」。只在使用模擬通道時存在。
- *
- * 回呼直接在行程內呼叫處理方法,不發 HTTP:模擬通道和 PayPool 跑在同一個程式裡,
- * 發 HTTP 等於自己打自己,還得先知道自己的 host/port。
- */
 @Slf4j
 @RestController
 @RequiredArgsConstructor
-@ConditionalOnProperty(name = "app.pay.channel", havingValue = "mock", matchIfMissing = true)
+@ConditionalOnProperty(name = "app.pay.channel", havingValue = "mock")
 @Tag(name = "Mock Channel", description = "模擬付款通道(開發用)")
 public class MockChannelController {
 
@@ -52,7 +46,6 @@ public class MockChannelController {
                 rechargeService.handleNotify(rechargeId);
                 sent++;
             } catch (Exception e) {
-                // 回呼失敗是「通道沒收到成功回覆」,付款本身已經完成;交給主動查單補上
                 log.warn("Mock callback for {} failed", rechargeId, e);
             }
         }
