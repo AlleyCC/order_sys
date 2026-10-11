@@ -31,10 +31,14 @@ public class AuthService {
     private final JwtUtils jwtUtils;
     private final PasswordUtils passwordUtils;
     private final TokenRedisService tokenRedisService;
+    private final LoginRateLimiter loginRateLimiter;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
-    public LoginResponse login(LoginRequest request, String encryptedPassword) {
-        // 1. RSA decrypt password
+    public LoginResponse login(LoginRequest request, String encryptedPassword, String clientIp) {
+        if (!loginRateLimiter.tryAttempt(request.getUserId(), clientIp)) {
+            throw new AuthenticationException("帳密錯誤");
+        }
+
         String rawPassword;
         try {
             rawPassword = passwordUtils.decryptPassword(encryptedPassword);
@@ -42,22 +46,20 @@ public class AuthService {
             throw new AuthenticationException("帳密錯誤");
         }
 
-        // 2. Find user
         User user = userMapper.selectById(request.getUserId());
         if (user == null) {
             throw new AuthenticationException("帳密錯誤");
         }
 
-        // 3. BCrypt verify
         if (!passwordEncoder.matches(rawPassword, user.getPassword())) {
             throw new AuthenticationException("帳密錯誤");
         }
 
-        // 4. Generate tokens(純身份憑證,角色由授權層每次請求查)
+        loginRateLimiter.onSuccess(request.getUserId(), clientIp);
+
         String accessToken = jwtUtils.generateAccessToken(user.getUserId());
         String refreshTokenId = UUID.randomUUID().toString();
 
-        // 5. Save refresh token to Redis
         long ttlSeconds = refreshTokenDays * 24 * 60 * 60;
         tokenRedisService.saveRefreshToken(refreshTokenId, user.getUserId(), ttlSeconds);
 
@@ -65,26 +67,22 @@ public class AuthService {
     }
 
     public RefreshResponse refresh(RefreshRequest request) {
-        // 1. Find refresh token in Redis
         String userId = tokenRedisService.getRefreshTokenUserId(request.getRefreshToken());
         if (userId == null) {
             throw new AuthenticationException("Refresh Token 已失效");
         }
 
-        // 2. Find user
         User user = userMapper.selectById(userId);
         if (user == null) {
             throw new AuthenticationException("Refresh Token 已失效");
         }
 
-        // 3. Generate new access token
         String accessToken = jwtUtils.generateAccessToken(user.getUserId());
 
         return new RefreshResponse(accessToken, accessTokenExpiresIn);
     }
 
     public void logout(String refreshTokenId, String accessToken) {
-        // Blacklist access token in Redis
         if (accessToken != null) {
             try {
                 Claims claims = jwtUtils.parseToken(accessToken);
@@ -93,12 +91,10 @@ public class AuthService {
                     long remaining = jwtUtils.getRemainingSeconds(claims);
                     tokenRedisService.blacklistAccessToken(jti, remaining);
                 }
-            } catch (Exception e) {
-                // Access token may already be expired — ignore
+            } catch (Exception ignored) {
             }
         }
 
-        // Delete refresh token from Redis
         if (refreshTokenId != null) {
             tokenRedisService.deleteRefreshToken(refreshTokenId);
         }

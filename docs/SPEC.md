@@ -18,6 +18,7 @@ PayPool 是一個團購/合資訂單管理系統的後端 API 服務，提供使
 | JSON | Jackson (Spring Boot 內建) |
 | 加密庫 | Bouncy Castle 1.80 (bcprov-jdk18on) |
 | 即時通訊 | WebSocket (STOMP + SockJS) |
+| Redis 用戶端 | Spring Data Redis (Lettuce);Redisson 3.52.0 只用於登入限流 |
 | 排程 | Java DelayQueue |
 | 工具 | Lombok |
 | 建構 | Maven |
@@ -61,10 +62,11 @@ Client (REST + WebSocket)
    - Header: Authorization: JWT <RSA加密密碼>
    - Body: { "userId": "xxx" }
 3. Server:
-   a. RSA 私鑰解密密碼
-   b. BCrypt 比對資料庫儲存的雜湊值
-   c. 查詢使用者角色 (user_role)
-   d. 簽發 Access Token (JWT RS256, 15min) + Refresh Token (UUID, 7d 存入 Redis)
+   a. 登入限流(見 2.8):被擋即回 401「帳密錯誤」,不進行後續步驟
+   b. RSA 私鑰解密密碼
+   c. BCrypt 比對資料庫儲存的雜湊值
+   d. 登入成功:該「帳號 + IP」的限流計數歸零,IP 記為該帳號的受信任 IP
+   e. 簽發 Access Token (JWT RS256, 15min) + Refresh Token (UUID, 7d 存入 Redis)
 4. 回傳: { "accessToken": "<JWT>", "refreshToken": "<UUID>", "expiresIn": 900 }
 ```
 
@@ -262,6 +264,33 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 
 > `users.role` 舊欄位已於 V9 移除(兩段式遷移完成),角色一律以 `user_roles` 為準。
 
+### 2.8 登入限流
+
+暴力猜密碼沒有單一個 key 擋得住:只依 IP,攻擊者換 IP 就繞過;只依帳號鎖定,攻擊者可以故意輸錯把別人鎖住。所以分三層,在解密密碼之前依序判斷:
+
+| 層 | 計數對象 | 預設上限 | 對付 | 歸零 |
+|----|---------|---------|------|------|
+| L1 | 來源 IP | 每 1 分鐘 5 次 | 單一來源大量請求、密碼噴灑 | 不歸零 |
+| L2 | 帳號 + 來源 IP | 每 15 分鐘 5 次 | 暴力破解同一帳號 | 該組合登入成功即歸零 |
+| L3 | 帳號(僅計不受信任 IP) | 每 1 小時 20 次 | 分散式 IP 猜同一帳號 | 不歸零 |
+
+- **計的是嘗試次數**:先取得許可再驗證密碼,併發請求也最多只有上限數量進入密碼驗證
+- **滑動時間窗**:使用 Redisson `RRateLimiter`,每個許可在取得後滿一個時間窗才釋放,沒有固定窗口交界處兩倍流量的問題
+- **受信任 IP**:登入成功的 IP 記為該帳號的受信任 IP,保留 30 天(每次成功重新計算)。受信任 IP 不計入也不受 L3 限制,仍受 L1、L2 限制;攻擊者觸發 L3 時,帳號本人從常用的 IP 仍可登入
+- **帳號 key**:取請求帶的 `userId`,去頭尾空白後轉小寫;帳號不存在也照樣計數,不能從限流行為判斷帳號是否存在。`users.user_id` 的 collation(`utf8mb4_0900_ai_ci`)不分大小寫也不分重音,`alicé` 在 DB 會查到 `alice`,所以 `userId` 只允許英數字與 `.` `_` `-`,否則 400,避免同一帳號用不同寫法取得多組額度
+- **來源 IP**:取 TCP 連線位址(`getRemoteAddr()`),不採信 `X-Forwarded-For`。日後前面加反向代理時,以 `server.forward-headers-strategy` 與可信代理設定處理,限流程式不用改
+- **回應**:被擋時回應與帳密錯誤完全相同(401「帳密錯誤」),不帶 `Retry-After`
+- **故障**:限流元件存取 Redis 出錯(逾時、連線重建中)時 fail-open,放行並記 warn log。Redis 整台掛掉時登入本身就無法寫入 Refresh Token,不受此影響
+- **設定**:`app.login-limit.ip|user-ip|user.rate`、`.interval`,`app.login-limit.trusted-ip-ttl`;`app.login-limit.redis-timeout`(預設 300ms,不重試)是限流每次等 Redis 回應的上限,逾時即 fail-open,不沿用 `spring.data.redis.timeout`;`app.login-limit.redis-connect-timeout`(預設 2s)是建立連線的上限,連線只建一次,放寬以免遠端或 TLS 交握較慢時連線永遠建不起來
+- **調整門檻立即生效**:key 名稱含上限與時間窗(例如 `5-60s`),改設定後改用新 key,舊 key 自然過期
+
+| Redis key | 型別 | 說明 |
+|-----------|------|------|
+| `login:limit:ip:{rate}-{秒}s:{ip}` | RRateLimiter | L1,TTL = 時間窗 |
+| `login:limit:user-ip:{rate}-{秒}s:{userId}:{ip}` | RRateLimiter | L2,TTL = 時間窗 |
+| `login:limit:user:{rate}-{秒}s:{userId}` | RRateLimiter | L3,TTL = 時間窗 |
+| `login:trusted:{userId}` | RSetCache | 受信任 IP,每個成員各自 30 天 TTL |
+
 ---
 
 ## 3. API 規格
@@ -324,7 +353,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 | 位置 | 欄位 | 型別 | 必填 | 說明 |
 |------|------|------|------|------|
 | Header | Authorization | String | Y | 格式: `JWT <RSA加密後的密碼>` |
-| Body | userId | String | Y | 使用者帳號 |
+| Body | userId | String | Y | 使用者帳號,最多 20 字元,只允許英數字與 `.` `_` `-` |
 
 **Response 200 OK:**
 
@@ -336,7 +365,9 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 }
 ```
 
-**Response 401 Unauthorized:**
+**Response 400 Bad Request:** `userId` 空白、超過 20 字元,或含英數字與 `.` `_` `-` 以外的字元
+
+**Response 401 Unauthorized:** 帳密錯誤,或嘗試次數超過登入限流(見 2.8),兩者回應相同
 
 ```json
 { "status": 401, "detail": "帳密錯誤" }
@@ -1576,6 +1607,13 @@ Redis Pub/Sub 不保存訊息,收件人剛好離線或正在重連時,推播就�
 | 密碼錯誤 | 401，detail: "密碼錯誤" |
 | 帳號不存在 | 401，detail: "密碼錯誤"（不揭露帳號是否存在） |
 | 登出 | 200，Access Token 列入黑名單、Refresh Token 自 Redis 刪除 |
+| 同一 IP 1 分鐘內第 6 次登入(L1) | 401「帳密錯誤」，即使密碼正確 |
+| 同一 IP 對同一帳號第 6 次登入(L2) | 401；同帳號從其他 IP 不受影響；登入成功後歸零 |
+| 20 個不受信任 IP 嘗試同一帳號後(L3) | 新 IP 401；曾成功登入的 IP 仍可登入 |
+| 帳號大小寫不同、帳號不存在 | 照樣計數 |
+| 帶偽造的 X-Forwarded-For | 仍以連線來源計數 |
+| userId 超過 20 字元 | 400，不計數 |
+| 限流元件存取 Redis 出錯 | fail-open，照常驗證密碼 |
 | 使用已登出的 Refresh Token 換發 | 401 |
 | 登出後舊 Access Token 在 15 分鐘內仍可使用 | 200（空窗期，設計如此） |
 | Token 過期 | 401，detail: "Token Expired" |
