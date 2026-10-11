@@ -7,7 +7,6 @@ import org.redisson.api.RRateLimiter;
 import org.redisson.api.RSetCache;
 import org.redisson.api.RateType;
 import org.redisson.api.RedissonClient;
-import org.redisson.client.RedisException;
 import org.redisson.client.codec.StringCodec;
 import org.springframework.stereotype.Component;
 
@@ -30,7 +29,7 @@ public class LoginRateLimiter {
     public boolean tryAttempt(String userId, String ip) {
         try {
             return acquireAll(normalize(userId), ip);
-        } catch (RedisException e) {
+        } catch (RuntimeException e) {
             log.warn("登入限流判斷失敗(Redis 故障?),fail-open 放行 ip={}", ip, e);
             return true;
         }
@@ -41,7 +40,7 @@ public class LoginRateLimiter {
         try {
             redissonClient.getRateLimiter(userIpKey(account, ip)).delete();
             trustedIps(account).add(ip, properties.getTrustedIpTtl().toMillis(), TimeUnit.MILLISECONDS);
-        } catch (RedisException e) {
+        } catch (RuntimeException e) {
             log.warn("登入成功後更新限流紀錄失敗(Redis 故障?) ip={}", ip, e);
         }
     }
@@ -69,7 +68,7 @@ public class LoginRateLimiter {
 
     private boolean acquire(String key, LoginLimitProperties.Limit limit) {
         RRateLimiter limiter = redissonClient.getRateLimiter(key);
-        limiter.trySetRate(RateType.OVERALL, limit.getRate(), limit.getInterval(), limit.getInterval());
+        limiter.trySetRate(RateType.OVERALL, limit.getRate(), limit.getInterval(), limit.getInterval().multipliedBy(2));
         return limiter.tryAcquire();
     }
 
@@ -86,6 +85,6 @@ public class LoginRateLimiter {
     }
 
     private String normalize(String userId) {
-        return userId.trim().toLowerCase(Locale.ROOT);
+        return userId.toLowerCase(Locale.ROOT);
     }
 }

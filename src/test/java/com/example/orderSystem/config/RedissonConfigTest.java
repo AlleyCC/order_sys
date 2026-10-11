@@ -7,9 +7,12 @@ import org.redisson.config.SingleServerConfig;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.redis.RedisConnectionDetails;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RedissonConfigTest {
 
@@ -92,6 +95,36 @@ class RedissonConfigTest {
                     assertThat(server.getConnectTimeout()).isEqualTo(5000);
                     assertThat(server.getTimeout()).isEqualTo(300);
                 });
+    }
+
+    @Test
+    @DisplayName("只做登入限流,連線池與執行緒維持小規模")
+    void keepsPoolsSmall() {
+        runner.run(context -> {
+            RedissonClient client = context.getBean(RedissonClient.class);
+            SingleServerConfig server = serverConfig(client);
+            assertThat(server.getConnectionPoolSize()).isEqualTo(8);
+            assertThat(server.getConnectionMinimumIdleSize()).isEqualTo(1);
+            assertThat(client.getConfig().getThreads()).isEqualTo(2);
+            assertThat(client.getConfig().getNettyThreads()).isEqualTo(4);
+        });
+    }
+
+    @Test
+    @DisplayName("設定了 SSL bundle 時啟動失敗:Redisson 不會套用 bundle 的憑證,不默默用錯的信任來源")
+    void failsFastOnSslBundle() {
+        RedisProperties redisProperties = new RedisProperties();
+        redisProperties.getSsl().setBundle("internal-ca");
+        RedisConnectionDetails connection = new RedisConnectionDetails() {
+            @Override
+            public Standalone getStandalone() {
+                return Standalone.of("redis.internal", 6379);
+            }
+        };
+
+        assertThatThrownBy(() -> RedissonConfig.redissonConfig(connection, redisProperties, new LoginLimitProperties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("SSL bundle");
     }
 
     @Test

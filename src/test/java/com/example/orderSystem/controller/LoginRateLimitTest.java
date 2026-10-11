@@ -11,6 +11,8 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -46,6 +48,18 @@ class LoginRateLimitTest extends AbstractLoginRateLimitTest {
         LoginRateLimiter relaxed = limiterWithIpRate(5);
 
         assertThat(relaxed.tryAttempt(randomUser(), ip)).isTrue();
+    }
+
+    @Test
+    @DisplayName("限流 key 的存活時間大於時間窗,不會在設定與取得許可之間過期")
+    void limiterKeysOutliveTheInterval() throws Exception {
+        login(randomUser(), WRONG_PASSWORD, "10.1.0.10");
+
+        Set<String> keys = redisTemplate.keys("*login:limit:ip:5-60s:10.1.0.10*");
+        assertThat(keys).isNotEmpty();
+        for (String key : keys) {
+            assertThat(redisTemplate.getExpire(key, TimeUnit.SECONDS)).as(key).isGreaterThan(60L);
+        }
     }
 
     @Test

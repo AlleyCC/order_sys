@@ -277,7 +277,7 @@ users ──< user_roles >── roles ──< role_resources >── resources(
 - **計的是嘗試次數**:先取得許可再驗證密碼,併發請求也最多只有上限數量進入密碼驗證
 - **滑動時間窗**:使用 Redisson `RRateLimiter`,每個許可在取得後滿一個時間窗才釋放,沒有固定窗口交界處兩倍流量的問題
 - **受信任 IP**:登入成功的 IP 記為該帳號的受信任 IP,保留 30 天(每次成功重新計算)。受信任 IP 不計入也不受 L3 限制,仍受 L1、L2 限制;攻擊者觸發 L3 時,帳號本人從常用的 IP 仍可登入
-- **帳號 key**:取請求帶的 `userId`,去頭尾空白後轉小寫;帳號不存在也照樣計數,不能從限流行為判斷帳號是否存在。`users.user_id` 的 collation(`utf8mb4_0900_ai_ci`)不分大小寫也不分重音,`alicé` 在 DB 會查到 `alice`,所以 `userId` 只允許英數字與 `.` `_` `-`,否則 400,避免同一帳號用不同寫法取得多組額度
+- **帳號 key**:取請求帶的 `userId`,轉小寫;帳號不存在也照樣計數,不能從限流行為判斷帳號是否存在。`users.user_id` 的 collation(`utf8mb4_0900_ai_ci`)不分大小寫也不分重音,`alicé` 在 DB 會查到 `alice`,所以 `userId` 只允許英數字與 `.` `_` `-`,否則 400,避免同一帳號用不同寫法取得多組額度
 - **來源 IP**:取 TCP 連線位址(`getRemoteAddr()`),不採信 `X-Forwarded-For`。日後前面加反向代理時,以 `server.forward-headers-strategy` 與可信代理設定處理,限流程式不用改
 - **回應**:被擋時回應與帳密錯誤完全相同(401「帳密錯誤」),不帶 `Retry-After`
 - **故障**:限流元件存取 Redis 出錯(逾時、連線重建中)時 fail-open,放行並記 warn log。Redis 整台掛掉時登入本身就無法寫入 Refresh Token,不受此影響

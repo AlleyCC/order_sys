@@ -55,13 +55,13 @@ public class AuthService {
             throw new AuthenticationException("帳密錯誤");
         }
 
-        loginRateLimiter.onSuccess(request.getUserId(), clientIp);
-
         String accessToken = jwtUtils.generateAccessToken(user.getUserId());
         String refreshTokenId = UUID.randomUUID().toString();
 
         long ttlSeconds = refreshTokenDays * 24 * 60 * 60;
         tokenRedisService.saveRefreshToken(refreshTokenId, user.getUserId(), ttlSeconds);
+
+        loginRateLimiter.onSuccess(request.getUserId(), clientIp);
 
         return new LoginResponse(accessToken, refreshTokenId, accessTokenExpiresIn);
     }
