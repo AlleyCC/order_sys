@@ -100,6 +100,22 @@ class AuthServiceTest {
         }
 
         @Test
+        @DisplayName("寫入 Refresh Token 失敗 → 不記錄登入成功(不歸零、不加入受信任 IP)")
+        void refreshTokenSaveFailsDoesNotRecordSuccess() throws Exception {
+            User user = createUser("alice", "test1234");
+            when(passwordUtils.decryptPassword("encrypted")).thenReturn("test1234");
+            when(userMapper.selectById("alice")).thenReturn(user);
+            when(jwtUtils.generateAccessToken("alice")).thenReturn("jwt-token");
+            doThrow(new RuntimeException("redis down"))
+                    .when(tokenRedisService).saveRefreshToken(anyString(), eq("alice"), anyLong());
+
+            assertThatThrownBy(() -> authService.login(loginRequest("alice"), "encrypted", "10.0.0.1"))
+                    .isInstanceOf(RuntimeException.class);
+
+            verify(loginRateLimiter, never()).onSuccess(anyString(), anyString());
+        }
+
+        @Test
         @DisplayName("RSA 解密失敗 → AuthenticationException")
         void rsaDecryptFails() throws Exception {
             when(passwordUtils.decryptPassword("bad")).thenThrow(new RuntimeException("decrypt error"));
